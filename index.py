@@ -1,51 +1,224 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, colorchooser
-from PIL import Image, ImageDraw, ImageTk
-import os, io, base64, threading, urllib.request, json, webbrowser
+import sys
+import os
+import io
+import json
+import math
+import base64
+import urllib.request
 
-def _scale(base, factor): return max(1, round(base * factor))
-
-import tkinter as _tk
-_root_check = _tk.Tk()
-_root_check.withdraw()
-_SW = _root_check.winfo_screenwidth()
-_SH = _root_check.winfo_screenheight()
-_root_check.destroy()
-del _root_check, _tk
-
-_UI = _SH / 1080
-
-PREVIEW_W  = _scale(300, _UI)
-PREVIEW_H  = _scale(220, _UI)
-FONT       = ("Segoe UI", _scale(12, _UI))
-FONT_BIG   = ("Segoe UI", _scale(13, _UI), "bold")
-FONT_LINK  = ("Segoe UI", _scale(9,  _UI), "underline")
-FONT_SMALL = ("Segoe UI", _scale(9,  _UI))
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".image_merger_config.json")
-
-DEFAULT_MODEL  = "gemini-2.0-flash-lite"
-DEFAULT_PROMPT = "Опиши подробно что изображено на этой картинке на русском языке."
-
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "{model}:generateContent?key={key}"
+from PySide6.QtCore import Qt, QThread, Signal, QMimeData
+from PySide6.QtGui import QPixmap, QImage, QColor, QAction, QIcon, QDragEnterEvent, QDropEvent
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QLabel, QPushButton, QFileDialog,
+    QMessageBox, QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton,
+    QButtonGroup, QCheckBox, QSpinBox, QSlider, QLineEdit, QTextEdit, QDialog,
+    QColorDialog, QScrollArea, QFrame, QGridLayout, QSizePolicy, QComboBox
 )
 
-# Только бесплатные модели
-KNOWN_MODELS = [
-    "gemini-2.0-flash-lite",   # самый быстрый, высокий бесплатный лимит
-    "gemini-2.0-flash",        # быстрый, универсальный
-    "gemini-flash-latest",     # всегда последняя Flash
+from PIL import Image, ImageDraw
+
+
+# ── Constants ────────────────────────────────────────────────────────────────
+CONFIG_PATH  = os.path.join(os.path.expanduser("~"), ".image_merger_config.json")
+def _resource(rel):
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+FAVICON_PATH = _resource(os.path.join("img", "favicon.ico"))
+MAX_IMAGES   = 10
+
+DEFAULT_MODEL = "gemini-2.0-flash-lite"
+GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+GEMINI_LIST_URL = "https://generativelanguage.googleapis.com/v1beta/models?key={key}&pageSize=200"
+VISION_METHODS  = {"generateContent", "streamGenerateContent"}
+
+FALLBACK_MODELS = [
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
 ]
 
 
+# ── i18n ─────────────────────────────────────────────────────────────────────
+STRINGS = {
+    "en": {
+        "window_title":        "Image Merger",
+        "images_panel":        "Images (drag to reorder)",
+        "add_images":          "+ Add images",
+        "clear_all":           "Clear all",
+        "merge_settings":      "Merge settings",
+        "mode":                "Mode:",
+        "mode_horizontal":     "Horizontal strip",
+        "mode_vertical":       "Vertical strip",
+        "mode_grid":           "Grid",
+        "grid_cols":           "Columns:",
+        "grid_padding":        "Padding:",
+        "grid_bg":             "Background:",
+        "cell_align":          "Cell align:",
+        "align_fill":          "Fill",
+        "align_fit":           "Fit",
+        "divider":             "Divider",
+        "thickness":           "Thickness:",
+        "px":                  "px",
+        "color_btn":           "  Color  ",
+        "jpeg_compress":       "JPEG compression",
+        "quality":             "Quality:",
+        "merge_btn":           "Merge images",
+        "result":              "Result:",
+        "result_placeholder":  "Result will appear here",
+        "save_btn":            "Save",
+        "description_gemini":  "Description (Gemini AI):",
+        "copy_btn":            "Copy",
+        "extra_prompt_label":  "Extra context (optional):",
+        "extra_prompt_hint":   "Additional details sent with the main prompt…",
+        "describe_btn":        "▶  Describe image",
+        "no_images":           "No images",
+        "load_images":         "Please add at least 2 images.",
+        "no_result":           "No result",
+        "merge_first":         "Please merge images first.",
+        "api_key_missing":     "API key",
+        "enter_api_key":       "Enter a Gemini API key.\nGet one free at: aistudio.google.com/apikey",
+        "describing":          "⏳ Describing image…",
+        "error_open":          "Error",
+        "failed_open":         "Failed to open file:\n{}",
+        "save_error":          "Save error",
+        "quality_90":          "Quality {}% — minimal loss, large file",
+        "quality_75":          "Quality {}% — good size/quality balance",
+        "quality_50":          "Quality {}% — noticeable artifacts, small file",
+        "quality_low":         "Quality {}% — heavy compression, low quality",
+        "size_info":           "Size: {}×{} px | Format: {} | ~{}",
+        "mb":                  "{:.1f} MB",
+        "kb":                  "{:.0f} KB",
+        "model_current":       "Model: {}",
+        "cancel":              "Cancel",
+        "save":                "Save",
+        "apply":               "Apply",
+        "menu_language":       "Language",
+        "menu_model":          "Model…",
+        "menu_api_key":        "API key…",
+        "menu_prompt":         "Main prompt…",
+        "model_title":         "Select Gemini model",
+        "model_free_label":    "Select a model (vision-capable, free tier):",
+        "model_custom_label":  "Or enter manually:",
+        "model_fetch_btn":     "Fetch models from API…",
+        "model_fetching":      "Fetching…",
+        "model_fetch_ok":      "Loaded {} vision models.",
+        "model_fetch_err":     "Error: {}",
+        "models_link":         "Model list: ai.google.dev/gemini-api/docs/models",
+        "prompt_title":        "Main prompt",
+        "prompt_label":        "Prompt sent to Gemini with every request:",
+        "apikey_title":        "Gemini API key",
+        "apikey_label":        "Enter your API key (stored locally):",
+        "apikey_link":         "Get a free key at aistudio.google.com/apikey",
+        "err_400": "❌ Error 400 — Bad request.\n\n{}\nCheck your prompt and data format.",
+        "err_401": "❌ Error 401 — API key invalid or missing.\n\nGet a key: aistudio.google.com/apikey",
+        "err_403": "❌ Error 403 — Access forbidden.\n\nCurrent model: {}",
+        "err_404": "❌ Error 404 — Model not found: «{}»\n\nOpen Settings → Model and select another.",
+        "err_429": "❌ Error 429 — Rate limit exceeded.\n\nWait a moment and try again.",
+        "err_500": "❌ Error 500 — Internal Google server error.\n\nTry again later.",
+        "err_503": "❌ Error 503 — Service unavailable.\n\nTry again in a few minutes.",
+        "err_timeout": "❌ Request timed out.\n\nCheck your internet connection.",
+        "err_dns":     "❌ Could not connect to Google servers.\n\nCheck your internet connection.",
+        "err_generic": "❌ Unexpected error:\n\n{}",
+        "max_images":  "Maximum {} images allowed.",
+    },
+    "ru": {
+        "window_title":        "Image Merger",
+        "images_panel":        "Изображения (перетащите для сортировки)",
+        "add_images":          "+ Добавить изображения",
+        "clear_all":           "Очистить всё",
+        "merge_settings":      "Настройки склейки",
+        "mode":                "Режим:",
+        "mode_horizontal":     "Горизонтальная лента",
+        "mode_vertical":       "Вертикальная лента",
+        "mode_grid":           "Сетка",
+        "grid_cols":           "Колонок:",
+        "grid_padding":        "Отступ:",
+        "grid_bg":             "Фон:",
+        "cell_align":          "Заполнение:",
+        "align_fill":          "Растянуть",
+        "align_fit":           "Вписать",
+        "divider":             "Разделитель",
+        "thickness":           "Толщина:",
+        "px":                  "px",
+        "color_btn":           "  Цвет  ",
+        "jpeg_compress":       "JPEG сжатие",
+        "quality":             "Качество:",
+        "merge_btn":           "Склеить изображения",
+        "result":              "Результат:",
+        "result_placeholder":  "Здесь появится результат",
+        "save_btn":            "Сохранить",
+        "description_gemini":  "Описание (Gemini AI):",
+        "copy_btn":            "Копировать",
+        "extra_prompt_label":  "Дополнительный контекст (необязательно):",
+        "extra_prompt_hint":   "Дополнительные сведения для промпта…",
+        "describe_btn":        "▶  Описать изображение",
+        "no_images":           "Нет изображений",
+        "load_images":         "Добавьте не менее 2 изображений.",
+        "no_result":           "Нет результата",
+        "merge_first":         "Сначала склейте изображения.",
+        "api_key_missing":     "API ключ",
+        "enter_api_key":       "Введите Gemini API ключ.\nПолучить бесплатно: aistudio.google.com/apikey",
+        "describing":          "⏳ Описываю изображение…",
+        "error_open":          "Ошибка",
+        "failed_open":         "Не удалось открыть файл:\n{}",
+        "save_error":          "Ошибка сохранения",
+        "quality_90":          "Качество {}% — минимальные потери, большой файл",
+        "quality_75":          "Качество {}% — хороший баланс размера и качества",
+        "quality_50":          "Качество {}% — заметные артефакты, малый файл",
+        "quality_low":         "Качество {}% — сильное сжатие, низкое качество",
+        "size_info":           "Размер: {}×{} пикс. | Формат: {} | ~{}",
+        "mb":                  "{:.1f} МБ",
+        "kb":                  "{:.0f} КБ",
+        "model_current":       "Модель: {}",
+        "cancel":              "Отмена",
+        "save":                "Сохранить",
+        "apply":               "Применить",
+        "menu_language":       "Язык",
+        "menu_model":          "Модель…",
+        "menu_api_key":        "API ключ…",
+        "menu_prompt":         "Главный промпт…",
+        "model_title":         "Выбор модели Gemini",
+        "model_free_label":    "Выберите модель (с поддержкой изображений, бесплатные):",
+        "model_custom_label":  "Или введите вручную:",
+        "model_fetch_btn":     "Получить модели из API…",
+        "model_fetching":      "Загрузка…",
+        "model_fetch_ok":      "Загружено {} моделей с поддержкой изображений.",
+        "model_fetch_err":     "Ошибка: {}",
+        "models_link":         "Список моделей: ai.google.dev/gemini-api/docs/models",
+        "prompt_title":        "Главный промпт",
+        "prompt_label":        "Промпт, отправляемый в Gemini с каждым запросом:",
+        "apikey_title":        "Gemini API ключ",
+        "apikey_label":        "Введите ваш API ключ (хранится локально):",
+        "apikey_link":         "Получить бесплатно на aistudio.google.com/apikey",
+        "err_400": "❌ Ошибка 400 — Неверный запрос.\n\n{}\nПроверьте промпт и формат данных.",
+        "err_401": "❌ Ошибка 401 — API ключ недействителен.\n\nПолучить ключ: aistudio.google.com/apikey",
+        "err_403": "❌ Ошибка 403 — Доступ запрещён.\n\nТекущая модель: {}",
+        "err_404": "❌ Ошибка 404 — Модель не найдена: «{}»\n\nОткройте Настройки → Модель.",
+        "err_429": "❌ Ошибка 429 — Превышен лимит запросов.\n\nПодождите немного.",
+        "err_500": "❌ Ошибка 500 — Внутренняя ошибка сервера.\n\nПопробуйте позже.",
+        "err_503": "❌ Ошибка 503 — Сервис недоступен.\n\nПопробуйте через несколько минут.",
+        "err_timeout": "❌ Превышено время ожидания.\n\nПроверьте интернет-соединение.",
+        "err_dns":     "❌ Не удалось подключиться к серверам Google.\n\nПроверьте интернет-соединение.",
+        "err_generic": "❌ Неожиданная ошибка:\n\n{}",
+        "max_images":  "Максимально допустимо {} изображений.",
+    },
+}
+
+DEFAULT_PROMPTS = {
+    "en": "Describe in detail what is shown in this image in English.",
+    "ru": "Опиши подробно что изображено на этой картинке на русском языке.",
+}
+
+
+# ── Config ────────────────────────────────────────────────────────────────────
 def load_config() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
-
 
 def save_config(data: dict):
     try:
@@ -55,808 +228,1059 @@ def save_config(data: dict):
         pass
 
 
-def friendly_api_error(e: Exception, model: str) -> str:
+# ── API helpers ───────────────────────────────────────────────────────────────
+def friendly_api_error(e: Exception, model: str, lang: str = "en") -> str:
+    t   = STRINGS[lang]
     msg = str(e)
     if hasattr(e, "code"):
         code = e.code
         try:
-            body = e.read().decode("utf-8", errors="replace")
-            err_json = json.loads(body)
-            api_msg = (err_json.get("error", {}).get("message", "")
-                       or err_json.get("message", ""))
+            api_msg = json.loads(e.read().decode()).get("error", {}).get("message", "")
         except Exception:
             api_msg = ""
-        if code == 400:
-            return f"❌ Ошибка 400 — Неверный запрос.\n\n{api_msg or 'Проверьте правильность промпта и формат данных.'}"
-        if code == 401:
-            return ("❌ Ошибка 401 — API ключ недействителен или отсутствует.\n\n"
-                    "Проверьте ключ и попробуйте снова.\nПолучить ключ: aistudio.google.com/apikey")
-        if code == 403:
-            return (f"❌ Ошибка 403 — Доступ запрещён.\n\nВозможные причины:\n"
-                    f"• API ключ не имеет прав на эту модель\n• Модель недоступна в вашем регионе\n"
-                    f"• Текущая модель: {model}")
-        if code == 404:
-            return (f"❌ Ошибка 404 — Модель не найдена: «{model}»\n\nЧто можно сделать:\n"
-                    "• Нажмите кнопку ✏ Модель и выберите другую\n"
-                    "• Проверьте правильность названия модели\n"
-                    "• Список доступных моделей: ai.google.dev/gemini-api/docs/models")
-        if code == 429:
-            return ("❌ Ошибка 429 — Превышен лимит запросов.\n\n"
-                    "Подождите немного и попробуйте снова.\nИли используйте другой API ключ.")
-        if code == 500:
-            return "❌ Ошибка 500 — Внутренняя ошибка сервера Google.\n\nПопробуйте позже."
-        if code == 503:
-            return "❌ Ошибка 503 — Сервис временно недоступен.\n\nПопробуйте через несколько минут."
-        return f"❌ HTTP ошибка {code}.\n\n{api_msg or msg}"
+        if code == 400: return t["err_400"].format(api_msg)
+        if code == 401: return t["err_401"]
+        if code == 403: return t["err_403"].format(model)
+        if code == 404: return t["err_404"].format(model)
+        if code == 429: return t["err_429"]
+        if code == 500: return t["err_500"]
+        if code == 503: return t["err_503"]
+        return t["err_generic"].format(f"HTTP {code}: {api_msg or msg}")
     if "timed out" in msg.lower() or "timeout" in msg.lower():
-        return "❌ Превышено время ожидания ответа от сервера.\n\nПроверьте интернет-соединение."
-    if "name or service not known" in msg.lower() or "getaddrinfo" in msg.lower():
-        return "❌ Не удалось подключиться к серверам Google.\n\nПроверьте интернет-соединение."
-    return f"❌ Неожиданная ошибка:\n\n{msg}"
+        return t["err_timeout"]
+    if "getaddrinfo" in msg.lower() or "name or service" in msg.lower():
+        return t["err_dns"]
+    return t["err_generic"].format(msg)
 
 
-def describe_image_gemini(api_key: str, model: str, prompt: str,
-                          pil_img: Image.Image) -> str:
+def describe_image_gemini(api_key: str, model: str, prompt: str, pil_img: Image.Image) -> str:
     buf = io.BytesIO()
     pil_img.convert("RGB").save(buf, format="JPEG", quality=85)
     b64 = base64.b64encode(buf.getvalue()).decode()
-    payload = json.dumps({
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
-            ]
-        }]
-    }).encode()
-    url = GEMINI_URL.format(model=model, key=api_key)
-    req = urllib.request.Request(url, data=payload,
-                                 headers={"Content-Type": "application/json"}, method="POST")
+    payload = json.dumps({"contents": [{"parts": [
+        {"text": prompt},
+        {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+    ]}]}).encode()
+    req = urllib.request.Request(
+        GEMINI_URL.format(model=model, key=api_key),
+        data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read())
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
-# ── Context menu mixin ─────────────────────────────────────────────────────────
-def attach_context_menu(widget, is_text_widget=False):
-    """Attach right-click context menu + toolbar support to Entry or Text widget."""
+def fetch_vision_models(api_key: str) -> list[str]:
+    req = urllib.request.Request(
+        GEMINI_LIST_URL.format(key=api_key),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    result = []
+    for m in data.get("models", []):
+        short   = m.get("name", "").replace("models/", "")
+        methods = set(m.get("supportedGenerationMethods", []))
+        is_free = any(k in short for k in ("flash", "lite", "nano"))
+        if is_free and methods & VISION_METHODS:
+            result.append(short)
+    return sorted(result)
 
-    def _copy(event=None):
-        try:
-            widget.event_generate("<<Copy>>")
-        except Exception:
-            pass
 
-    def _cut(event=None):
-        try:
-            widget.event_generate("<<Cut>>")
-        except Exception:
-            pass
+# ── Qt helpers ────────────────────────────────────────────────────────────────
+def pil_to_pixmap(img: Image.Image) -> QPixmap:
+    img  = img.convert("RGBA")
+    raw  = img.tobytes("raw", "RGBA")
+    qimg = QImage(raw, img.width, img.height, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qimg.copy())
 
-    def _paste(event=None):
-        try:
-            widget.event_generate("<<Paste>>")
-        except Exception:
-            pass
 
-    def _select_all(event=None):
-        if is_text_widget:
-            widget.tag_add(tk.SEL, "1.0", tk.END)
-            widget.mark_set(tk.INSERT, tk.END)
+class Scale:
+    def __init__(self, factor: float):
+        self.f = factor
+    def __call__(self, base: int) -> int:
+        return max(1, round(base * self.f))
+
+
+def _shade(hex_color: str, factor: float) -> str:
+    c = QColor(hex_color)
+    return QColor(
+        max(0, min(255, int(c.red()   * factor))),
+        max(0, min(255, int(c.green() * factor))),
+        max(0, min(255, int(c.blue()  * factor))),
+    ).name()
+
+def button_style(bg: str, fg: str = "white", hover: str = None,
+                 pressed: str = None, extra: str = "") -> str:
+    h = hover   or _shade(bg, 1.08)
+    p = pressed or _shade(bg, 0.85)
+    return (
+        f"QPushButton{{background:{bg};color:{fg};border:none;border-radius:6px;{extra}}}"
+        f"QPushButton:hover{{background:{h};}}"
+        f"QPushButton:pressed{{background:{p};padding-top:2px;padding-bottom:0px;}}"
+        f"QPushButton:disabled{{background:#ccc;color:#888;}}"
+    )
+
+NEUTRAL = button_style("#e9ecef", fg="#333333")
+
+def _contrast(hex_color: str) -> str:
+    c = QColor(hex_color)
+    return "#000" if (c.red()*299 + c.green()*587 + c.blue()*114) / 1000 > 150 else "#fff"
+
+
+# ── Image merge logic ─────────────────────────────────────────────────────────
+def merge_horizontal(images: list[Image.Image], divider: tuple | None) -> Image.Image:
+    """Merge images side by side, all scaled to same height."""
+    h   = max(img.height for img in images)
+    scaled = [img.resize((max(1, int(img.width * h / img.height)), h), Image.LANCZOS)
+              for img in images]
+    dw  = divider[0] if divider else 0
+    dc  = divider[1] if divider else None
+    total_w = sum(s.width for s in scaled) + dw * (len(scaled) - 1)
+    out = Image.new("RGBA", (total_w, h), (0, 0, 0, 0))
+    x = 0
+    for i, s in enumerate(scaled):
+        out.paste(s, (x, 0))
+        x += s.width
+        if divider and i < len(scaled) - 1:
+            r, g, b = _hex_to_rgb(dc)
+            ImageDraw.Draw(out).rectangle([x, 0, x + dw - 1, h - 1], fill=(r, g, b, 255))
+            x += dw
+    return out
+
+
+def merge_vertical(images: list[Image.Image], divider: tuple | None) -> Image.Image:
+    """Merge images top-to-bottom, all scaled to same width."""
+    w   = max(img.width for img in images)
+    scaled = [img.resize((w, max(1, int(img.height * w / img.width))), Image.LANCZOS)
+              for img in images]
+    dw  = divider[0] if divider else 0
+    dc  = divider[1] if divider else None
+    total_h = sum(s.height for s in scaled) + dw * (len(scaled) - 1)
+    out = Image.new("RGBA", (w, total_h), (0, 0, 0, 0))
+    y = 0
+    for i, s in enumerate(scaled):
+        out.paste(s, (0, y))
+        y += s.height
+        if divider and i < len(scaled) - 1:
+            r, g, b = _hex_to_rgb(dc)
+            ImageDraw.Draw(out).rectangle([0, y, w - 1, y + dw - 1], fill=(r, g, b, 255))
+            y += dw
+    return out
+
+
+def merge_grid(images: list[Image.Image], cols: int, padding: int,
+               bg_color: str, cell_fill: bool) -> Image.Image:
+    """
+    Arrange images in a grid.
+    cell_fill=True  → each image is stretched to fill the cell (crop-to-fill).
+    cell_fill=False → each image fits inside the cell with bg padding.
+    Cell size = max image dimensions across the entire set.
+    """
+    n    = len(images)
+    rows = math.ceil(n / cols)
+    cell_w = max(img.width  for img in images)
+    cell_h = max(img.height for img in images)
+
+    total_w = cols * cell_w + (cols + 1) * padding
+    total_h = rows * cell_h + (rows + 1) * padding
+
+    bg_rgb = _hex_to_rgb(bg_color)
+    out = Image.new("RGBA", (total_w, total_h), (*bg_rgb, 255))
+
+    for idx, img in enumerate(images):
+        row = idx // cols
+        col = idx  % cols
+        cx  = padding + col * (cell_w + padding)
+        cy  = padding + row * (cell_h + padding)
+
+        if cell_fill:
+            # Crop-to-fill: scale so image covers the cell entirely
+            scale = max(cell_w / img.width, cell_h / img.height)
+            nw    = max(1, int(img.width  * scale))
+            nh    = max(1, int(img.height * scale))
+            thumb = img.resize((nw, nh), Image.LANCZOS)
+            ox    = (nw - cell_w) // 2
+            oy    = (nh - cell_h) // 2
+            thumb = thumb.crop((ox, oy, ox + cell_w, oy + cell_h))
+            out.paste(thumb, (cx, cy))
         else:
-            widget.select_range(0, tk.END)
-            widget.icursor(tk.END)
-        return "break"
+            # Fit: scale so image fits inside the cell, center it
+            scale = min(cell_w / img.width, cell_h / img.height)
+            nw    = max(1, int(img.width  * scale))
+            nh    = max(1, int(img.height * scale))
+            thumb = img.resize((nw, nh), Image.LANCZOS)
+            ox    = cx + (cell_w - nw) // 2
+            oy    = cy + (cell_h - nh) // 2
+            out.paste(thumb, (ox, oy))
 
-    def _show_menu(event):
-        menu = tk.Menu(widget, tearoff=0, font=FONT)
-        menu.add_command(label="✂  Вырезать",    command=_cut)
-        menu.add_command(label="📋  Копировать",  command=_copy)
-        menu.add_command(label="📌  Вставить",    command=_paste)
-        menu.add_separator()
-        menu.add_command(label="☰  Выделить всё", command=_select_all)
+    return out
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+# ── Workers ───────────────────────────────────────────────────────────────────
+class DescribeWorker(QThread):
+    finished_ok  = Signal(str)
+    finished_err = Signal(str)
+
+    def __init__(self, api_key, model, prompt, pil_img, lang):
+        super().__init__()
+        self.api_key = api_key; self.model = model
+        self.prompt  = prompt;  self.pil_img = pil_img; self.lang = lang
+
+    def run(self):
         try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-
-    widget.bind("<Button-3>", _show_menu)
-    widget.bind("<Control-a>", _select_all)
-    widget.bind("<Control-A>", _select_all)
-    # Ctrl+V / Ctrl+C / Ctrl+X are already handled natively by tkinter,
-    # but we bind them explicitly for Entry widgets with show="●"
-    if not is_text_widget:
-        def _paste_entry(event):
-            try:
-                text = widget.clipboard_get()
-                try:
-                    sel_start = widget.index(tk.SEL_FIRST)
-                    sel_end   = widget.index(tk.SEL_LAST)
-                    widget.delete(sel_start, sel_end)
-                except tk.TclError:
-                    pass
-                widget.insert(tk.INSERT, text)
-            except tk.TclError:
-                pass
-            return "break"
-        widget.bind("<Control-v>", _paste_entry)
-        widget.bind("<Control-V>", _paste_entry)
-
-    return {"copy": _copy, "cut": _cut, "paste": _paste, "select_all": _select_all}
+            self.finished_ok.emit(
+                describe_image_gemini(self.api_key, self.model, self.prompt, self.pil_img))
+        except Exception as e:
+            self.finished_err.emit(friendly_api_error(e, self.model, self.lang))
 
 
-# ── Edit toolbar ───────────────────────────────────────────────────────────────
-def make_edit_toolbar(parent, widget, is_text_widget=False):
-    """Create a small Copy/Cut/Paste/Select All toolbar row."""
-    ops = attach_context_menu(widget, is_text_widget)
-    bar = tk.Frame(parent, bg="#f0f0f0")
+class FetchModelsWorker(QThread):
+    finished_ok  = Signal(list)
+    finished_err = Signal(str)
 
-    btn_cfg = dict(font=FONT_SMALL, relief="flat", pady=2, padx=8,
-                   bg="#e9ecef", activebackground="#dee2e6")
-    tk.Button(bar, text="✂ Вырезать",    command=ops["cut"],        **btn_cfg).pack(side="left", padx=(0, 2))
-    tk.Button(bar, text="📋 Копировать",  command=ops["copy"],       **btn_cfg).pack(side="left", padx=(0, 2))
-    tk.Button(bar, text="📌 Вставить",    command=ops["paste"],      **btn_cfg).pack(side="left", padx=(0, 2))
-    tk.Button(bar, text="☰ Выделить всё", command=ops["select_all"], **btn_cfg).pack(side="left")
-    return bar
+    def __init__(self, api_key):
+        super().__init__(); self.api_key = api_key
+
+    def run(self):
+        try:    self.finished_ok.emit(fetch_vision_models(self.api_key))
+        except Exception as e: self.finished_err.emit(str(e))
 
 
-# ── Prompt dialog ──────────────────────────────────────────────────────────────
-class PromptDialog(tk.Toplevel):
-    def __init__(self, parent, current_prompt: str):
+# ── Thumbnail card widget ─────────────────────────────────────────────────────
+class ThumbCard(QWidget):
+    """Small removable thumbnail shown in the image list panel."""
+    remove_requested = Signal(int)   # emits own index
+    move_left        = Signal(int)
+    move_right       = Signal(int)
+
+    THUMB = 90  # thumbnail pixel size (before scale)
+
+    def __init__(self, idx: int, img: Image.Image, filename: str, scale: Scale):
+        super().__init__()
+        self._idx  = idx
+        self._img  = img
+        sz = scale(self.THUMB)
+        self.setFixedWidth(sz + scale(4))
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(scale(2))
+
+        # Thumbnail
+        pix     = pil_to_pixmap(img)
+        thumb   = pix.scaled(sz, sz, Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+        img_lbl = QLabel()
+        img_lbl.setPixmap(thumb)
+        img_lbl.setFixedSize(sz, sz)
+        img_lbl.setStyleSheet("border:1px solid #bbb; background:white;")
+        img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(img_lbl)
+
+        # Filename (truncated)
+        name = filename if len(filename) <= 12 else filename[:10] + "…"
+        name_lbl = QLabel(name)
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        name_lbl.setStyleSheet("font-size:8px; color:#555;")
+        root.addWidget(name_lbl)
+
+        # Controls row: ◀ index ▶  ✕
+        ctrl = QHBoxLayout()
+        ctrl.setContentsMargins(0, 0, 0, 0)
+        ctrl.setSpacing(scale(2))
+
+        self._left_btn = QPushButton("◀")
+        self._left_btn.setFixedWidth(scale(22))
+        self._left_btn.setStyleSheet(NEUTRAL + f"QPushButton{{padding:1px;}}")
+        self._left_btn.clicked.connect(lambda: self.move_left.emit(self._idx))
+
+        self._num_lbl = QLabel(str(idx + 1))
+        self._num_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._num_lbl.setStyleSheet("font-size:9px; color:#444;")
+        self._num_lbl.setFixedWidth(scale(18))
+
+        self._right_btn = QPushButton("▶")
+        self._right_btn.setFixedWidth(scale(22))
+        self._right_btn.setStyleSheet(NEUTRAL + f"QPushButton{{padding:1px;}}")
+        self._right_btn.clicked.connect(lambda: self.move_right.emit(self._idx))
+
+        rm_btn = QPushButton("✕")
+        rm_btn.setFixedWidth(scale(22))
+        rm_btn.setStyleSheet(button_style("#dc3545", extra="padding:1px;"))
+        rm_btn.clicked.connect(lambda: self.remove_requested.emit(self._idx))
+
+        ctrl.addWidget(self._left_btn)
+        ctrl.addWidget(self._num_lbl)
+        ctrl.addWidget(self._right_btn)
+        ctrl.addStretch()
+        ctrl.addWidget(rm_btn)
+        root.addLayout(ctrl)
+
+    def update_index(self, idx: int):
+        self._idx = idx
+        self._num_lbl.setText(str(idx + 1))
+
+
+# ── Dialogs ───────────────────────────────────────────────────────────────────
+class PromptDialog(QDialog):
+    def __init__(self, parent, current: str, scale: Scale, tr):
         super().__init__(parent)
-        self.title("Редактировать промпт")
-        self.resizable(True, True)
-        self.result = None
-        self.grab_set()
-        self.configure(bg="#f0f0f0")
-
-        tk.Label(self, text="Промпт для Gemini:", font=FONT_BIG,
-                 bg="#f0f0f0").pack(anchor="w", padx=12, pady=(12, 4))
-
-        self.text = tk.Text(self, font=FONT, width=60, height=8,
-                            relief="solid", bd=1, wrap="word")
-        self.text.pack(fill="both", expand=True, padx=12, pady=4)
-        self.text.insert("1.0", current_prompt)
-
-        tb = make_edit_toolbar(self, self.text, is_text_widget=True)
-        tb.pack(fill="x", padx=12, pady=(0, 4))
-
-        btn_row = tk.Frame(self, bg="#f0f0f0")
-        btn_row.pack(fill="x", padx=12, pady=(4, 12))
-        tk.Button(btn_row, text="Сохранить", font=FONT_BIG,
-                  bg="#4a90d9", fg="white", relief="flat", pady=4, padx=20,
-                  command=self._ok).pack(side="right", padx=(6, 0))
-        tk.Button(btn_row, text="Отмена", font=FONT,
-                  bg="#6c757d", fg="white", relief="flat", pady=4, padx=16,
-                  command=self.destroy).pack(side="right")
-        self._center(parent)
+        self.setWindowTitle(tr("prompt_title"))
+        self.result_text = None
+        s = scale
+        root = QVBoxLayout(self)
+        root.setSpacing(s(8))
+        root.addWidget(QLabel(tr("prompt_label")))
+        self.text = QTextEdit()
+        self.text.setPlainText(current)
+        self.text.setMinimumSize(s(480), s(160))
+        root.addWidget(self.text)
+        row = QHBoxLayout(); row.addStretch()
+        cancel = QPushButton(tr("cancel"))
+        cancel.setStyleSheet(button_style("#6c757d", extra=f"padding:{s(6)}px {s(16)}px;"))
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton(tr("save"))
+        ok.setStyleSheet(button_style("#4a90d9", extra=f"padding:{s(6)}px {s(20)}px; font-weight:bold;"))
+        ok.clicked.connect(self._ok)
+        row.addWidget(cancel); row.addWidget(ok)
+        root.addLayout(row)
 
     def _ok(self):
-        self.result = self.text.get("1.0", "end").strip()
-        self.destroy()
-
-    def _center(self, parent):
-        self.update_idletasks()
-        px = parent.winfo_x() + parent.winfo_width() // 2
-        py = parent.winfo_y() + parent.winfo_height() // 2
-        w, h = self.winfo_width(), self.winfo_height()
-        self.geometry(f"+{px - w // 2}+{py - h // 2}")
+        self.result_text = self.text.toPlainText().strip()
+        self.accept()
 
 
-# ── Model dialog ───────────────────────────────────────────────────────────────
-class ModelDialog(tk.Toplevel):
-    def __init__(self, parent, current_model: str):
+class ApiKeyDialog(QDialog):
+    def __init__(self, parent, current: str, scale: Scale, tr):
         super().__init__(parent)
-        self.title("Выбор модели Gemini")
-        self.resizable(True, True)
-        self.result = None
-        self.grab_set()
-        self.configure(bg="#f0f0f0")
+        self.setWindowTitle(tr("apikey_title"))
+        self.result_key = None
+        s = scale
+        root = QVBoxLayout(self)
+        root.setSpacing(s(8))
+        root.addWidget(QLabel(tr("apikey_label")))
+        row = QHBoxLayout()
+        self.edit = QLineEdit(current)
+        self.edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit.setMinimumWidth(s(340))
+        row.addWidget(self.edit)
+        self._hidden = True
+        eye = QPushButton("👁"); eye.setFixedWidth(s(36)); eye.setStyleSheet(NEUTRAL)
+        eye.clicked.connect(self._toggle)
+        row.addWidget(eye)
+        root.addLayout(row)
+        link = QLabel(f'<a href="https://aistudio.google.com/apikey">{tr("apikey_link")}</a>')
+        link.setOpenExternalLinks(True); link.setStyleSheet("color:#888; font-size:10px;")
+        root.addWidget(link)
+        br = QHBoxLayout(); br.addStretch()
+        cancel = QPushButton(tr("cancel"))
+        cancel.setStyleSheet(button_style("#6c757d", extra=f"padding:{s(6)}px {s(16)}px;"))
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton(tr("apply"))
+        ok.setStyleSheet(button_style("#4a90d9", extra=f"padding:{s(6)}px {s(20)}px; font-weight:bold;"))
+        ok.clicked.connect(self._ok)
+        br.addWidget(cancel); br.addWidget(ok)
+        root.addLayout(br)
 
-        tk.Label(self, text="Выберите модель (только бесплатные):", font=FONT_BIG,
-                 bg="#f0f0f0").pack(anchor="w", padx=12, pady=(12, 4))
-
-        self.var = tk.StringVar(value=current_model if current_model in KNOWN_MODELS else KNOWN_MODELS[0])
-        for m in KNOWN_MODELS:
-            tk.Radiobutton(self, text=m, variable=self.var, value=m,
-                           font=FONT, bg="#f0f0f0", anchor="w",
-                           activebackground="#e0e0e0").pack(fill="x", padx=20, pady=1)
-
-        tk.Label(self, text="Или введите вручную:", font=FONT,
-                 bg="#f0f0f0").pack(anchor="w", padx=12, pady=(8, 2))
-
-        custom_frame = tk.Frame(self, bg="#f0f0f0")
-        custom_frame.pack(fill="x", padx=12, pady=(0, 4))
-        self.custom = tk.Entry(custom_frame, font=FONT, relief="solid", bd=1, width=40)
-        self.custom.pack(fill="x")
-        self.custom.bind("<FocusIn>", lambda e: self.var.set(""))
-        attach_context_menu(self.custom)
-
-        tb = make_edit_toolbar(self, self.custom)
-        tb.pack(fill="x", padx=12, pady=(0, 4))
-
-        btn_row = tk.Frame(self, bg="#f0f0f0")
-        btn_row.pack(fill="x", padx=12, pady=(4, 12))
-        tk.Button(btn_row, text="Применить", font=FONT_BIG,
-                  bg="#4a90d9", fg="white", relief="flat", pady=4, padx=20,
-                  command=self._ok).pack(side="right", padx=(6, 0))
-        tk.Button(btn_row, text="Отмена", font=FONT,
-                  bg="#6c757d", fg="white", relief="flat", pady=4, padx=16,
-                  command=self.destroy).pack(side="right")
-
-        tk.Label(self, text="Список моделей: ai.google.dev/gemini-api/docs/models",
-                 font=("Segoe UI", 8), fg="#888", bg="#f0f0f0").pack(pady=(0, 6))
-        self._center(parent)
+    def _toggle(self):
+        self._hidden = not self._hidden
+        self.edit.setEchoMode(
+            QLineEdit.EchoMode.Password if self._hidden else QLineEdit.EchoMode.Normal)
 
     def _ok(self):
-        custom = self.custom.get().strip()
-        self.result = custom if custom else self.var.get()
-        self.destroy()
-
-    def _center(self, parent):
-        self.update_idletasks()
-        px = parent.winfo_x() + parent.winfo_width() // 2
-        py = parent.winfo_y() + parent.winfo_height() // 2
-        w, h = self.winfo_width(), self.winfo_height()
-        self.geometry(f"+{px - w // 2}+{py - h // 2}")
+        self.result_key = self.edit.text().strip()
+        self.accept()
 
 
-# ── Main app ───────────────────────────────────────────────────────────────────
-class ImageMerger(tk.Tk):
+class ModelDialog(QDialog):
+    def __init__(self, parent, current: str, known: list, scale: Scale, tr, api_key: str):
+        super().__init__(parent)
+        self.setWindowTitle(tr("model_title"))
+        self.result_model  = None
+        self._tr           = tr
+        self._api_key      = api_key
+        self._known        = list(known)
+        self._worker       = None
+        s = scale
+        root = QVBoxLayout(self); root.setSpacing(s(6))
+        root.addWidget(QLabel(tr("model_free_label")))
+        self.group  = QButtonGroup(self)
+        self.radios: list[QRadioButton] = []
+        self._rbox  = QVBoxLayout()
+        root.addLayout(self._rbox)
+        self._rebuild(current)
+        root.addWidget(QLabel(tr("model_custom_label")))
+        self.custom = QLineEdit()
+        if current not in self._known: self.custom.setText(current)
+        root.addWidget(self.custom)
+        self.fetch_btn = QPushButton(tr("model_fetch_btn"))
+        self.fetch_btn.setStyleSheet(button_style("#6c757d", extra=f"padding:{s(5)}px {s(12)}px;"))
+        self.fetch_btn.clicked.connect(self._fetch)
+        root.addWidget(self.fetch_btn)
+        self.status_lbl = QLabel(""); self.status_lbl.setStyleSheet("color:#555; font-size:10px;")
+        root.addWidget(self.status_lbl)
+        br = QHBoxLayout(); br.addStretch()
+        cancel = QPushButton(tr("cancel"))
+        cancel.setStyleSheet(button_style("#6c757d", extra=f"padding:{s(6)}px {s(16)}px;"))
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton(tr("apply"))
+        ok.setStyleSheet(button_style("#4a90d9", extra=f"padding:{s(6)}px {s(20)}px; font-weight:bold;"))
+        ok.clicked.connect(self._ok)
+        br.addWidget(cancel); br.addWidget(ok)
+        root.addLayout(br)
+        link = QLabel(f'<a href="https://ai.google.dev/gemini-api/docs/models">{tr("models_link")}</a>')
+        link.setOpenExternalLinks(True); link.setStyleSheet("color:#888; font-size:10px;")
+        root.addWidget(link)
+
+    def _rebuild(self, current: str):
+        for rb in self.radios:
+            self._rbox.removeWidget(rb); self.group.removeButton(rb); rb.deleteLater()
+        self.radios.clear()
+        for m in self._known:
+            rb = QRadioButton(m)
+            if m == current: rb.setChecked(True)
+            self.group.addButton(rb); self.radios.append(rb); self._rbox.addWidget(rb)
+
+    def _fetch(self):
+        if not self._api_key:
+            self.status_lbl.setText("⚠ Enter API key first (Settings → API key)."); return
+        self.fetch_btn.setEnabled(False)
+        self.status_lbl.setText(self._tr("model_fetching"))
+        self._worker = FetchModelsWorker(self._api_key)
+        self._worker.finished_ok.connect(self._on_ok)
+        self._worker.finished_err.connect(self._on_err)
+        self._worker.start()
+
+    def _on_ok(self, models: list):
+        self.fetch_btn.setEnabled(True)
+        if models:
+            self._known = models
+            cur = next((rb.text() for rb in self.radios if rb.isChecked()), "")
+            self._rebuild(cur)
+            self.status_lbl.setText(self._tr("model_fetch_ok").format(len(models)))
+        else:
+            self.status_lbl.setText("No vision models found.")
+
+    def _on_err(self, err: str):
+        self.fetch_btn.setEnabled(True)
+        self.status_lbl.setText(self._tr("model_fetch_err").format(err[:80]))
+
+    def _ok(self):
+        custom = self.custom.text().strip()
+        self.result_model = custom if custom else next(
+            (rb.text() for rb in self.radios if rb.isChecked()), None)
+        self.accept()
+
+
+# ── Main window ───────────────────────────────────────────────────────────────
+class ImageMerger(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("Image Merger")
-        self.resizable(True, True)
-        self.configure(bg="#f0f0f0")
 
-        self.pil_images  = [None, None]
-        self.tk_previews = [None, None]
-        self.img_names   = ["", ""]
-        self.result_pil  = None
-        self.result_tk   = None
-        self.direction   = tk.StringVar(value="horizontal")
-        self._config     = load_config()
+        self._images:   list[Image.Image] = []   # PIL images in order
+        self._names:    list[str]         = []   # filenames
+        self.result_pil: Image.Image | None = None
 
-        saved_model = self._config.get("gemini_model", DEFAULT_MODEL)
-        # Reset if saved model is not in free list
-        self._model  = saved_model if saved_model in KNOWN_MODELS else DEFAULT_MODEL
-        self._prompt = self._config.get("gemini_prompt", DEFAULT_PROMPT)
+        self._config        = load_config()
+        self._lang          = self._config.get("language", "en")
+        self._api_key       = self._config.get("gemini_api_key", "")
+        self._model         = self._config.get("gemini_model", DEFAULT_MODEL)
+        self._prompt        = self._config.get("gemini_prompt", DEFAULT_PROMPTS[self._lang])
+        self._divider_color = self._config.get("divider_color", "#000000")
+        self._grid_bg_color = self._config.get("grid_bg_color", "#ffffff")
+        self._known_models  = self._config.get("known_models", list(FALLBACK_MODELS))
+        self._worker: DescribeWorker | None = None
 
-        # Divider settings
-        self._divider_enabled = tk.BooleanVar(value=self._config.get("divider_enabled", False))
-        self._divider_color   = self._config.get("divider_color", "#000000")
-        self._divider_width   = tk.IntVar(value=self._config.get("divider_width", 4))
+        geo    = QApplication.primaryScreen().availableGeometry()
+        factor = max(0.7, min(1.6, min(geo.width() / 1920, geo.height() / 1080)))
+        self.s = Scale(factor)
+        self.setStyleSheet(f"QWidget{{font-size:{self.s(10)}pt;}}")
 
-        # Compression settings
-        self._compress_enabled = tk.BooleanVar(value=self._config.get("compress_enabled", False))
-        self._compress_quality = tk.IntVar(value=self._config.get("compress_quality", 85))
+        if os.path.exists(FAVICON_PATH):
+            self.setWindowIcon(QIcon(FAVICON_PATH))
 
         self._build_ui()
         self._restore_window()
+        self._apply_language()
 
-        saved_key = self._config.get("gemini_api_key", "")
-        if saved_key:
-            self.api_key_var.set(saved_key)
+    def tr(self, key: str) -> str:
+        return STRINGS[self._lang].get(key, STRINGS["en"].get(key, key))
 
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # ── UI ────────────────────────────────────────────────────────────────────
+    # ── Build UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
-        container = tk.Frame(self, bg="#f0f0f0")
-        container.pack(fill="both", expand=True)
+        s = self.s
 
-        vsb = tk.Scrollbar(container, orient="vertical")
-        hsb = tk.Scrollbar(container, orient="horizontal")
-        sc = tk.Canvas(container, bg="#f0f0f0", highlightthickness=0,
-                       yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        vsb.config(command=sc.yview)
-        hsb.config(command=sc.xview)
+        # Menu bar
+        mb = self.menuBar()
+        self._menu_lang = mb.addMenu("")
+        for lang, label in [("en", "English"), ("ru", "Русский")]:
+            a = QAction(label, self); a.triggered.connect(lambda _, l=lang: self._set_language(l))
+            self._menu_lang.addAction(a)
 
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
-        sc.pack(side="left", fill="both", expand=True)
+        self._menu_settings = mb.addMenu("")
+        self._act_model  = QAction("", self); self._act_model.triggered.connect(self._open_model_dialog)
+        self._act_apikey = QAction("", self); self._act_apikey.triggered.connect(self._open_apikey_dialog)
+        self._act_prompt = QAction("", self); self._act_prompt.triggered.connect(self._open_prompt_dialog)
+        self._menu_settings.addAction(self._act_model)
+        self._menu_settings.addAction(self._act_apikey)
+        self._menu_settings.addSeparator()
+        self._menu_settings.addAction(self._act_prompt)
 
-        main_frame = tk.Frame(sc, bg="#f0f0f0")
-        self._scroll_win = sc.create_window((0, 0), window=main_frame, anchor="nw")
+        # Root layout
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        self.setCentralWidget(scroll)
+        root_widget = QWidget(); scroll.setWidget(root_widget)
+        root = QHBoxLayout(root_widget)
+        root.setContentsMargins(s(10), s(10), s(10), s(10))
+        root.setSpacing(s(10))
 
-        def _on_canvas_resize(e):
-            fw = main_frame.winfo_reqwidth()
-            fh = main_frame.winfo_reqheight()
-            x = max(0, (e.width - fw) // 2)
-            y = max(0, (e.height - fh) // 2)
-            sc.coords(self._scroll_win, x, y)
+        # ── LEFT ─────────────────────────────────────────────────────────────
+        left_widget = QWidget(); left_widget.setMaximumWidth(s(620))
+        left = QVBoxLayout(left_widget); left.setSpacing(s(8))
 
-        sc.bind("<Configure>", _on_canvas_resize)
-        main_frame.bind("<Configure>", lambda e: sc.configure(scrollregion=sc.bbox("all")))
-        sc.bind_all("<MouseWheel>", lambda e: sc.yview_scroll(int(-1*(e.delta/120)), "units"))
+        # Images panel
+        self._images_box = QGroupBox()
+        images_layout = QVBoxLayout(self._images_box)
+        images_layout.setSpacing(s(6))
 
-        # ── LEFT ──────────────────────────────────────────────────────────────
-        left = tk.Frame(main_frame, bg="#f0f0f0")
-        left.pack(side="left", fill="y", padx=(0, 8))
+        # Scroll area for thumbnails
+        thumb_scroll = QScrollArea()
+        thumb_scroll.setWidgetResizable(True)
+        thumb_scroll.setFixedHeight(s(170))
+        thumb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        thumb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        slots = tk.Frame(left, bg="#f0f0f0")
-        slots.pack()
-        self.canvases = []
-        for i in range(2):
-            col = tk.Frame(slots, bg="#f0f0f0")
-            col.pack(side="left", padx=6)
-            tk.Label(col, text=f"Изображение {i+1}", font=FONT_BIG,
-                     bg="#f0f0f0").pack(pady=(0, 4))
-            c = tk.Canvas(col, width=PREVIEW_W, height=PREVIEW_H,
-                          bg="white", relief="solid", bd=1, cursor="hand2")
-            c.pack()
-            self._placeholder(c)
-            c.bind("<Button-1>", lambda e, idx=i: self._load(idx))
-            self.canvases.append(c)
-            tk.Button(col, text="Выбрать файл", font=FONT, width=18, pady=4,
-                      command=lambda idx=i: self._load(idx)).pack(pady=6)
+        self._thumb_widget = QWidget()
+        self._thumb_layout = QHBoxLayout(self._thumb_widget)
+        self._thumb_layout.setContentsMargins(s(4), s(4), s(4), s(4))
+        self._thumb_layout.setSpacing(s(6))
+        self._thumb_layout.addStretch()
+        thumb_scroll.setWidget(self._thumb_widget)
+        images_layout.addWidget(thumb_scroll)
 
-        # Direction
-        dir_frame = tk.Frame(left, bg="#f0f0f0")
-        dir_frame.pack(pady=4)
-        tk.Label(dir_frame, text="Направление склейки:", font=FONT_BIG,
-                 bg="#f0f0f0").pack(side="left", padx=(0, 10))
-        for txt, val in [("Горизонтально", "horizontal"), ("Вертикально", "vertical")]:
-            tk.Radiobutton(dir_frame, text=txt, font=FONT,
-                           variable=self.direction, value=val,
-                           bg="#f0f0f0", indicatoron=0, width=16, pady=5,
-                           selectcolor="#4a90d9", activebackground="#4a90d9",
-                           fg="black").pack(side="left", padx=4)
+        # Add / clear buttons
+        btn_row = QHBoxLayout()
+        self.add_btn = QPushButton()
+        self.add_btn.setStyleSheet(button_style("#4a90d9", extra=f"padding:{s(6)}px {s(14)}px;"))
+        self.add_btn.clicked.connect(self._add_images)
+        btn_row.addWidget(self.add_btn)
+        self.clear_btn = QPushButton()
+        self.clear_btn.setStyleSheet(button_style("#dc3545", extra=f"padding:{s(6)}px {s(14)}px;"))
+        self.clear_btn.clicked.connect(self._clear_images)
+        btn_row.addWidget(self.clear_btn)
+        btn_row.addStretch()
+        images_layout.addLayout(btn_row)
+        left.addWidget(self._images_box)
 
-        # ── Divider settings ──────────────────────────────────────────────────
-        div_frame = tk.LabelFrame(left, text="Разделитель между картинками",
-                                  font=FONT, bg="#f0f0f0", relief="groove", bd=1)
-        div_frame.pack(fill="x", pady=(4, 2), padx=2)
+        # ── Merge settings ────────────────────────────────────────────────────
+        self.settings_box = QGroupBox()
+        sg = QVBoxLayout(self.settings_box); sg.setSpacing(s(4))
 
-        div_top = tk.Frame(div_frame, bg="#f0f0f0")
-        div_top.pack(fill="x", padx=8, pady=(4, 2))
+        # Mode selector
+        mode_row = QHBoxLayout()
+        self._mode_lbl = QLabel()
+        mode_row.addWidget(self._mode_lbl)
+        self._mode_group = QButtonGroup(self)
+        self._rb_horizontal = QRadioButton(); self._rb_horizontal.setChecked(True)
+        self._rb_vertical   = QRadioButton()
+        self._rb_grid       = QRadioButton()
+        for rb in (self._rb_horizontal, self._rb_vertical, self._rb_grid):
+            self._mode_group.addButton(rb); mode_row.addWidget(rb)
+        mode_row.addStretch()
+        sg.addLayout(mode_row)
+        self._mode_group.buttonClicked.connect(self._on_mode_changed)
 
-        tk.Checkbutton(div_top, text="Добавить линию-разделитель",
-                       variable=self._divider_enabled, font=FONT,
-                       bg="#f0f0f0", activebackground="#f0f0f0",
-                       command=self._update_divider_state).pack(side="left")
+        sg.addWidget(self._hline())
 
-        div_opts = tk.Frame(div_frame, bg="#f0f0f0")
-        div_opts.pack(fill="x", padx=8, pady=(0, 6))
+        # Grid settings (shown only in grid mode)
+        self._grid_box = QGroupBox()
+        gb = QHBoxLayout(self._grid_box); gb.setSpacing(s(8))
+        self._grid_cols_lbl = QLabel()
+        gb.addWidget(self._grid_cols_lbl)
+        self.grid_cols = QSpinBox(); self.grid_cols.setRange(1, 10)
+        self.grid_cols.setValue(self._config.get("grid_cols", 2))
+        self.grid_cols.setMinimumWidth(s(70))
+        gb.addWidget(self.grid_cols)
 
-        tk.Label(div_opts, text="Толщина:", font=FONT, bg="#f0f0f0").pack(side="left")
-        self._div_width_spin = tk.Spinbox(div_opts, textvariable=self._divider_width,
-                                          from_=1, to=50, width=5, font=FONT,
-                                          relief="solid", bd=1)
-        self._div_width_spin.pack(side="left", padx=(4, 12))
+        self._grid_pad_lbl = QLabel()
+        gb.addWidget(self._grid_pad_lbl)
+        self.grid_padding = QSpinBox(); self.grid_padding.setRange(0, 100)
+        self.grid_padding.setValue(self._config.get("grid_padding", 8))
+        self.grid_padding.setMinimumWidth(s(70))
+        self.grid_padding.setSuffix(" px")
+        gb.addWidget(self.grid_padding)
 
-        tk.Label(div_opts, text="px", font=FONT, bg="#f0f0f0").pack(side="left", padx=(0, 12))
+        self._grid_align_lbl = QLabel()
+        gb.addWidget(self._grid_align_lbl)
+        self.grid_align = QComboBox(); self.grid_align.setMinimumWidth(s(70))
+        gb.addWidget(self.grid_align)
 
-        self._div_color_btn = tk.Button(div_opts, text="  Цвет  ", font=FONT,
-                                        bg=self._divider_color, relief="solid", bd=1,
-                                        command=self._pick_divider_color)
-        self._div_color_btn.pack(side="left", padx=(0, 8))
+        self._grid_bg_lbl = QLabel()
+        gb.addWidget(self._grid_bg_lbl)
+        self.grid_bg_btn = QPushButton()
+        self.grid_bg_btn.clicked.connect(self._pick_grid_bg)
+        gb.addWidget(self.grid_bg_btn)
+        gb.addStretch()
+        sg.addWidget(self._grid_box)
+        self._refresh_grid_bg_btn()
 
-        self._div_color_lbl = tk.Label(div_opts, text=self._divider_color,
-                                       font=FONT_SMALL, bg="#f0f0f0", fg="#555")
-        self._div_color_lbl.pack(side="left")
+        sg.addWidget(self._hline())
 
+        # Divider settings
+        div_row = QHBoxLayout()
+        self.divider_enabled = QCheckBox()
+        self.divider_enabled.setChecked(self._config.get("divider_enabled", False))
+        self.divider_enabled.toggled.connect(self._update_divider_state)
+        div_row.addWidget(self.divider_enabled)
+        self._thick_lbl = QLabel(); div_row.addWidget(self._thick_lbl)
+        self.divider_width = QSpinBox(); self.divider_width.setRange(1, 50)
+        self.divider_width.setValue(self._config.get("divider_width", 4))
+        self.divider_width.setMinimumWidth(s(72))
+        div_row.addWidget(self.divider_width)
+        self._px_lbl = QLabel(); div_row.addWidget(self._px_lbl)
+        self.divider_color_btn = QPushButton()
+        self.divider_color_btn.clicked.connect(self._pick_divider_color)
+        div_row.addWidget(self.divider_color_btn)
+        self.divider_color_lbl = QLabel(self._divider_color)
+        self.divider_color_lbl.setStyleSheet("color:#555;")
+        div_row.addWidget(self.divider_color_lbl)
+        div_row.addStretch()
+        sg.addLayout(div_row)
+        self._refresh_divider_btn()
         self._update_divider_state()
 
-        # ── Compression settings ──────────────────────────────────────────────
-        comp_frame = tk.LabelFrame(left, text="Сжатие выходного изображения",
-                                   font=FONT, bg="#f0f0f0", relief="groove", bd=1)
-        comp_frame.pack(fill="x", pady=(4, 2), padx=2)
+        sg.addWidget(self._hline())
 
-        comp_top = tk.Frame(comp_frame, bg="#f0f0f0")
-        comp_top.pack(fill="x", padx=8, pady=(4, 2))
-
-        tk.Checkbutton(comp_top, text="Сохранять как JPEG со сжатием",
-                       variable=self._compress_enabled, font=FONT,
-                       bg="#f0f0f0", activebackground="#f0f0f0",
-                       command=self._update_compress_state).pack(side="left")
-
-        comp_opts = tk.Frame(comp_frame, bg="#f0f0f0")
-        comp_opts.pack(fill="x", padx=8, pady=(0, 2))
-
-        tk.Label(comp_opts, text="Качество:", font=FONT, bg="#f0f0f0").pack(side="left")
-
-        self._quality_scale = tk.Scale(comp_opts, variable=self._compress_quality,
-                                       from_=10, to=100, orient="horizontal",
-                                       length=160, font=FONT_SMALL,
-                                       bg="#f0f0f0", highlightthickness=0,
-                                       command=self._update_quality_label)
-        self._quality_scale.pack(side="left", padx=(6, 4))
-
-        self._quality_lbl = tk.Label(comp_opts, font=FONT, bg="#f0f0f0", width=4,
-                                     text=f"{self._compress_quality.get()}%")
-        self._quality_lbl.pack(side="left")
-
-        comp_info = tk.Frame(comp_frame, bg="#f0f0f0")
-        comp_info.pack(fill="x", padx=8, pady=(0, 6))
-        self._comp_info_lbl = tk.Label(comp_info, font=FONT_SMALL, bg="#f0f0f0",
-                                       fg="#555", text=self._get_quality_hint(self._compress_quality.get()))
-        self._comp_info_lbl.pack(side="left")
-
+        # Compression
+        comp_row = QHBoxLayout()
+        self.compress_enabled = QCheckBox()
+        self.compress_enabled.setChecked(self._config.get("compress_enabled", False))
+        self.compress_enabled.toggled.connect(self._update_compress_state)
+        comp_row.addWidget(self.compress_enabled)
+        self._quality_lbl = QLabel(); comp_row.addWidget(self._quality_lbl)
+        self.quality_slider = QSlider(Qt.Orientation.Horizontal)
+        self.quality_slider.setRange(10, 100)
+        self.quality_slider.setValue(self._config.get("compress_quality", 85))
+        self.quality_slider.setFixedWidth(s(140))
+        self.quality_slider.valueChanged.connect(self._on_quality_changed)
+        comp_row.addWidget(self.quality_slider)
+        self.quality_val_lbl = QLabel(); self.quality_val_lbl.setFixedWidth(s(36))
+        comp_row.addWidget(self.quality_val_lbl); comp_row.addStretch()
+        sg.addLayout(comp_row)
+        self.comp_hint_lbl = QLabel(); self.comp_hint_lbl.setStyleSheet("color:#555; font-size:10px;")
+        sg.addWidget(self.comp_hint_lbl)
         self._update_compress_state()
 
+        left.addWidget(self.settings_box)
+
         # Merge button
-        tk.Button(left, text="Склеить изображения", font=FONT_BIG,
-                  bg="#4a90d9", fg="white", activebackground="#357abd",
-                  relief="flat", pady=8, width=30,
-                  command=self._merge).pack(pady=6)
+        self.merge_btn = QPushButton()
+        self.merge_btn.setStyleSheet(button_style("#4a90d9", extra=f"font-weight:bold; padding:{s(10)}px;"))
+        self.merge_btn.clicked.connect(self._merge)
+        left.addWidget(self.merge_btn)
 
-        # Result
-        tk.Label(left, text="Результат:", font=FONT_BIG,
-                 bg="#f0f0f0").pack(anchor="w", pady=(4, 2))
-        self.result_canvas = tk.Canvas(left, width=PREVIEW_W * 2 + 20,
-                                       height=PREVIEW_H, bg="white",
-                                       relief="solid", bd=1)
-        self.result_canvas.pack()
-        self._placeholder(self.result_canvas, "Здесь появится результат")
+        # Result preview
+        self._result_title = QLabel()
+        left.addWidget(self._result_title)
+        preview_w = self.s(560); preview_h = self.s(220)
+        self.result_label = QLabel()
+        self.result_label.setFixedSize(preview_w, preview_h)
+        self.result_label.setStyleSheet("background:white; border:1px solid #999; color:#aaa;")
+        self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left.addWidget(self.result_label)
+        self.file_info_lbl = QLabel(); self.file_info_lbl.setStyleSheet("color:#555; font-size:10px;")
+        left.addWidget(self.file_info_lbl)
+        self.save_btn = QPushButton()
+        self.save_btn.setStyleSheet(button_style("#5cb85c", extra=f"font-weight:bold; padding:{s(10)}px;"))
+        self.save_btn.clicked.connect(self._save)
+        left.addWidget(self.save_btn)
+        left.addStretch()
+        root.addWidget(left_widget)
 
-        # File info label
-        self._file_info_lbl = tk.Label(left, text="", font=FONT_SMALL,
-                                        fg="#555", bg="#f0f0f0")
-        self._file_info_lbl.pack(anchor="w")
-
-        # Save row
-        save_row = tk.Frame(left, bg="#f0f0f0")
-        save_row.pack(fill="x", pady=6)
-        tk.Label(save_row, text="Имя файла:", font=FONT, bg="#f0f0f0").pack(side="left")
-        self.filename_var = tk.StringVar(value="result")
-        filename_entry = tk.Entry(save_row, textvariable=self.filename_var,
-                                  font=FONT, width=28, relief="solid", bd=1)
-        filename_entry.pack(side="left", padx=8)
-        attach_context_menu(filename_entry)
-
-        self._ext_lbl = tk.Label(save_row, text=".png", font=FONT, bg="#f0f0f0")
-        self._ext_lbl.pack(side="left")
-        tk.Button(save_row, text="Сохранить", font=FONT_BIG,
-                  bg="#5cb85c", fg="white", activebackground="#449d44",
-                  relief="flat", pady=4, padx=18,
-                  command=self._save).pack(side="left", padx=12)
-
-        # ── SEPARATOR ─────────────────────────────────────────────────────────
-        tk.Frame(main_frame, bg="#cccccc", width=1).pack(side="left", fill="y", padx=8)
+        # Separator
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine); sep.setStyleSheet("color:#ccc;")
+        root.addWidget(sep)
 
         # ── RIGHT ─────────────────────────────────────────────────────────────
-        right = tk.Frame(main_frame, bg="#f0f0f0")
-        right.pack(side="left", fill="both", expand=True)
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget); right.setSpacing(s(6))
 
-        desc_header = tk.Frame(right, bg="#f0f0f0")
-        desc_header.pack(fill="x", pady=(0, 4))
-        tk.Label(desc_header, text="Описание (Gemini AI):", font=FONT_BIG,
-                 bg="#f0f0f0").pack(side="left")
-        tk.Button(desc_header, text="Копировать", font=FONT,
-                  bg="#6c757d", fg="white", activebackground="#545b62",
-                  relief="flat", pady=3, padx=12,
-                  command=self._copy_desc).pack(side="right")
+        desc_row = QHBoxLayout()
+        self._desc_title_lbl = QLabel(); desc_row.addWidget(self._desc_title_lbl)
+        desc_row.addStretch()
+        self.copy_btn = QPushButton()
+        self.copy_btn.setStyleSheet(button_style("#6c757d", extra=f"padding:{s(4)}px {s(12)}px;"))
+        self.copy_btn.clicked.connect(self._copy_desc)
+        desc_row.addWidget(self.copy_btn)
+        right.addLayout(desc_row)
 
-        # API key
-        tk.Label(right, text="Gemini API ключ:", font=FONT,
-                 bg="#f0f0f0", anchor="w").pack(fill="x", pady=(0, 2))
+        self.model_lbl = QLabel(); self.model_lbl.setStyleSheet("color:#555; font-size:10px;")
+        right.addWidget(self.model_lbl)
 
-        key_row = tk.Frame(right, bg="#f0f0f0")
-        key_row.pack(fill="x", pady=(0, 2))
+        self._extra_lbl = QLabel(); right.addWidget(self._extra_lbl)
+        extra_row = QHBoxLayout()
+        self.extra_prompt = QLineEdit(); extra_row.addWidget(self.extra_prompt)
+        clr = QPushButton("✕"); clr.setFixedWidth(s(30)); clr.setStyleSheet(NEUTRAL)
+        clr.clicked.connect(self.extra_prompt.clear); extra_row.addWidget(clr)
+        right.addLayout(extra_row)
 
-        self.api_key_var = tk.StringVar()
-        self.api_key_entry = tk.Entry(key_row, textvariable=self.api_key_var,
-                                      font=FONT, relief="solid", bd=1, show="●")
-        self.api_key_entry.pack(side="left", fill="x", expand=True)
-        attach_context_menu(self.api_key_entry)
+        self.describe_btn = QPushButton()
+        self.describe_btn.setStyleSheet(button_style("#e8a020", extra=f"font-weight:bold; padding:{s(10)}px;"))
+        self.describe_btn.clicked.connect(self._describe)
+        right.addWidget(self.describe_btn)
 
-        self._key_hidden = True
-        self.toggle_btn = tk.Button(key_row, text="👁", font=("Segoe UI", 11),
-                                    bg="#f0f0f0", relief="flat", padx=6,
-                                    command=self._toggle_key_visibility)
-        self.toggle_btn.pack(side="left", padx=(4, 0))
+        self.desc_text = QTextEdit(); self.desc_text.setReadOnly(True)
+        right.addWidget(self.desc_text)
+        root.addWidget(right_widget, stretch=1)
 
-        # Toolbar for API key entry
-        key_tb = make_edit_toolbar(right, self.api_key_entry)
-        key_tb.pack(fill="x", pady=(2, 4))
+        # Restore mode
+        saved_mode = self._config.get("merge_mode", "horizontal")
+        if saved_mode == "vertical":  self._rb_vertical.setChecked(True)
+        elif saved_mode == "grid":    self._rb_grid.setChecked(True)
+        self._on_mode_changed()
 
-        # Link
-        link_row = tk.Frame(right, bg="#f0f0f0")
-        link_row.pack(fill="x", pady=(0, 8))
-        tk.Label(link_row, text="Получить бесплатный ключ: ",
-                 font=("Segoe UI", 9), fg="#555555", bg="#f0f0f0").pack(side="left")
-        link = tk.Label(link_row, text="aistudio.google.com/apikey",
-                        font=FONT_LINK, fg="#1a73e8", bg="#f0f0f0", cursor="hand2")
-        link.pack(side="left")
-        link.bind("<Button-1>", lambda e: webbrowser.open("https://aistudio.google.com/apikey"))
-        link.bind("<Enter>", lambda e: link.configure(fg="#0b47a1"))
-        link.bind("<Leave>", lambda e: link.configure(fg="#1a73e8"))
+    # ── Static helpers ────────────────────────────────────────────────────────
+    def _hline(self) -> QFrame:
+        f = QFrame(); f.setFrameShape(QFrame.Shape.HLine); f.setStyleSheet("color:#ddd;"); return f
 
-        # Model + Prompt
-        settings_row = tk.Frame(right, bg="#f0f0f0")
-        settings_row.pack(fill="x", pady=(0, 8))
-        tk.Button(settings_row, text="✏  Модель", font=FONT,
-                  bg="#6c757d", fg="white", activebackground="#545b62",
-                  relief="flat", pady=5, padx=14,
-                  command=self._edit_model).pack(side="left", padx=(0, 6))
-        tk.Button(settings_row, text="✏  Промпт", font=FONT,
-                  bg="#6c757d", fg="white", activebackground="#545b62",
-                  relief="flat", pady=5, padx=14,
-                  command=self._edit_prompt).pack(side="left")
+    def _current_mode(self) -> str:
+        if self._rb_vertical.isChecked(): return "vertical"
+        if self._rb_grid.isChecked():     return "grid"
+        return "horizontal"
 
-        self.model_label = tk.Label(right, font=("Segoe UI", 9), fg="#555",
-                                    bg="#f0f0f0", anchor="w")
-        self.model_label.pack(fill="x", pady=(0, 4))
-        self._refresh_model_label()
+    def _on_mode_changed(self, *_):
+        is_grid = self._rb_grid.isChecked()
+        self._grid_box.setVisible(is_grid)
+        # Divider not applicable to grid (padding replaces it)
+        self.divider_enabled.setEnabled(not is_grid)
+        self._update_divider_state()
 
-        tk.Button(right, text="▶  Описать изображение", font=FONT_BIG,
-                  bg="#e8a020", fg="white", activebackground="#c7871a",
-                  relief="flat", pady=8,
-                  command=self._describe).pack(fill="x", pady=(0, 4))
-
-        # Desc text toolbar
-        self.desc_text = tk.Text(right, font=FONT, height=16,
-                                 relief="solid", bd=1, wrap="word",
-                                 state="disabled", bg="white")
-
-        desc_tb = make_edit_toolbar(right, self.desc_text, is_text_widget=True)
-        desc_tb.pack(fill="x", pady=(0, 2))
-
-        self.desc_text.pack(fill="both", expand=True)
-
-    # ── Divider helpers ────────────────────────────────────────────────────────
-    def _update_divider_state(self):
-        state = "normal" if self._divider_enabled.get() else "disabled"
-        if hasattr(self, "_div_width_spin"):
-            self._div_width_spin.configure(state=state)
-        if hasattr(self, "_div_color_btn"):
-            self._div_color_btn.configure(state=state)
-
-    def _pick_divider_color(self):
-        color = colorchooser.askcolor(color=self._divider_color,
-                                      title="Цвет разделителя")[1]
-        if color:
-            self._divider_color = color
-            self._div_color_btn.configure(bg=color)
-            self._div_color_lbl.configure(text=color)
-
-    # ── Compression helpers ────────────────────────────────────────────────────
-    def _update_compress_state(self):
-        state = "normal" if self._compress_enabled.get() else "disabled"
-        if hasattr(self, "_quality_scale"):
-            self._quality_scale.configure(state=state)
-        ext = ".jpg" if self._compress_enabled.get() else ".png"
-        if hasattr(self, "_ext_lbl"):
-            self._ext_lbl.configure(text=ext)
-
-    def _get_quality_hint(self, q: int) -> str:
-        q = int(q)
-        if q >= 90: return f"Качество {q}% — минимальные потери, большой файл"
-        if q >= 75: return f"Качество {q}% — хороший баланс размера и качества"
-        if q >= 50: return f"Качество {q}% — заметные артефакты, малый файл"
-        return f"Качество {q}% — сильное сжатие, низкое качество"
-
-    def _update_quality_label(self, val=None):
-        q = self._compress_quality.get()
-        self._quality_lbl.configure(text=f"{q}%")
-        self._comp_info_lbl.configure(text=self._get_quality_hint(q))
-
-    # ── misc helpers ───────────────────────────────────────────────────────────
-    def _refresh_model_label(self):
-        self.model_label.configure(text=f"Модель: {self._model}")
-
-    def _placeholder(self, canvas, text="Нажмите для выбора"):
-        w, h = int(canvas["width"]), int(canvas["height"])
-        canvas.delete("all")
-        canvas.create_text(w // 2, h // 2, text=text, fill="#aaaaaa", font=FONT)
-
-    def _show_preview(self, canvas, pil_img):
-        w, h = int(canvas["width"]), int(canvas["height"])
-        img = pil_img.copy()
-        img.thumbnail((w - 4, h - 4), Image.LANCZOS)
-        tk_img = ImageTk.PhotoImage(img)
-        canvas.delete("all")
-        canvas.create_image(w // 2, h // 2, anchor="center", image=tk_img)
-        return tk_img
-
-    def _update_filename(self):
-        n1 = os.path.splitext(self.img_names[0])[0] if self.img_names[0] else ""
-        n2 = os.path.splitext(self.img_names[1])[0] if self.img_names[1] else ""
-        if n1 and n2:
-            self.filename_var.set(f"{n1} + {n2}")
-        elif n1:
-            self.filename_var.set(n1)
-
-    def _set_desc(self, text):
-        self.desc_text.configure(state="normal")
-        self.desc_text.delete("1.0", "end")
-        self.desc_text.insert("end", text)
-        self.desc_text.configure(state="disabled")
-
-    def _toggle_key_visibility(self):
-        self._key_hidden = not self._key_hidden
-        self.api_key_entry.configure(show="●" if self._key_hidden else "")
-        self.toggle_btn.configure(text="👁" if self._key_hidden else "🙈")
-
-    def _do_save_config(self):
-        self._config["gemini_api_key"]   = self.api_key_var.get().strip()
-        self._config["gemini_model"]     = self._model
-        self._config["gemini_prompt"]    = self._prompt
-        self._config["divider_enabled"]  = self._divider_enabled.get()
-        self._config["divider_color"]    = self._divider_color
-        self._config["divider_width"]    = self._divider_width.get()
-        self._config["compress_enabled"] = self._compress_enabled.get()
-        self._config["compress_quality"] = self._compress_quality.get()
-        save_config(self._config)
-
-    def _on_close(self):
-        self._save_window()
+    # ── Language ──────────────────────────────────────────────────────────────
+    def _set_language(self, lang: str):
+        self._lang = lang
+        self._apply_language()
         self._do_save_config()
-        self.destroy()
 
-    def _edit_model(self):
-        dlg = ModelDialog(self, self._model)
-        self.wait_window(dlg)
-        if dlg.result:
-            self._model = dlg.result
-            self._refresh_model_label()
+    def _apply_language(self):
+        tr = self.tr
+        self.setWindowTitle(tr("window_title"))
+        self._menu_lang.setTitle(tr("menu_language"))
+        self._menu_settings.setTitle("Settings" if self._lang == "en" else "Настройки")
+        self._act_model.setText(tr("menu_model"))
+        self._act_apikey.setText(tr("menu_api_key"))
+        self._act_prompt.setText(tr("menu_prompt"))
 
-    def _edit_prompt(self):
-        dlg = PromptDialog(self, self._prompt)
-        self.wait_window(dlg)
-        if dlg.result is not None:
-            self._prompt = dlg.result if dlg.result else DEFAULT_PROMPT
+        self._images_box.setTitle(tr("images_panel"))
+        self.add_btn.setText(tr("add_images"))
+        self.clear_btn.setText(tr("clear_all"))
 
-    # ── Logic ─────────────────────────────────────────────────────────────────
-    def _load(self, idx):
-        path = filedialog.askopenfilename(
-            title=f"Выберите изображение {idx + 1}",
-            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp"),
-                       ("Все файлы", "*.*")]
-        )
-        if not path:
+        self.settings_box.setTitle(tr("merge_settings"))
+        self._mode_lbl.setText(tr("mode"))
+        self._rb_horizontal.setText(tr("mode_horizontal"))
+        self._rb_vertical.setText(tr("mode_vertical"))
+        self._rb_grid.setText(tr("mode_grid"))
+
+        self._grid_cols_lbl.setText(tr("grid_cols"))
+        self._grid_pad_lbl.setText(tr("grid_padding"))
+        self._grid_align_lbl.setText(tr("cell_align"))
+        self._grid_bg_lbl.setText(tr("grid_bg"))
+        # Repopulate combo preserving selection
+        cur_idx = self.grid_align.currentIndex()
+        self.grid_align.blockSignals(True)
+        self.grid_align.clear()
+        self.grid_align.addItem(tr("align_fill"))  # index 0
+        self.grid_align.addItem(tr("align_fit"))   # index 1
+        self.grid_align.setCurrentIndex(max(0, cur_idx))
+        self.grid_align.blockSignals(False)
+
+        self.divider_enabled.setText(tr("divider"))
+        self._thick_lbl.setText(tr("thickness"))
+        self._px_lbl.setText(tr("px"))
+        self.divider_color_btn.setText(tr("color_btn"))
+        self.compress_enabled.setText(tr("jpeg_compress"))
+        self._quality_lbl.setText(tr("quality"))
+        self.merge_btn.setText(tr("merge_btn"))
+        self._result_title.setText(tr("result"))
+        if not self.result_pil:
+            self.result_label.setText(tr("result_placeholder"))
+        self.save_btn.setText(tr("save_btn"))
+        self._desc_title_lbl.setText(tr("description_gemini"))
+        self.copy_btn.setText(tr("copy_btn"))
+        self._extra_lbl.setText(tr("extra_prompt_label"))
+        self.extra_prompt.setPlaceholderText(tr("extra_prompt_hint"))
+        self.describe_btn.setText(tr("describe_btn"))
+        self._refresh_model_lbl()
+        self._on_quality_changed(self.quality_slider.value())
+
+    # ── Thumbnail list management ─────────────────────────────────────────────
+    def _rebuild_thumbs(self):
+        # Remove all cards (not the stretch)
+        while self._thumb_layout.count() > 1:
+            item = self._thumb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for i, (img, name) in enumerate(zip(self._images, self._names)):
+            card = ThumbCard(i, img, name, self.s)
+            card.remove_requested.connect(self._remove_image)
+            card.move_left.connect(self._move_left)
+            card.move_right.connect(self._move_right)
+            self._thumb_layout.insertWidget(i, card)
+
+    def _add_images(self):
+        remaining = MAX_IMAGES - len(self._images)
+        if remaining <= 0:
+            QMessageBox.warning(self, "", self.tr("max_images").format(MAX_IMAGES))
             return
-        try:
-            img = Image.open(path).convert("RGBA")
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось открыть файл:\n{e}")
-            return
-        self.pil_images[idx]  = img
-        self.img_names[idx]   = os.path.basename(path)
-        self.tk_previews[idx] = self._show_preview(self.canvases[idx], img)
-        self._update_filename()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, self.tr("add_images"), "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp);;All files (*.*)")
+        for path in paths[:remaining]:
+            try:
+                img = Image.open(path).convert("RGBA")
+                self._images.append(img)
+                self._names.append(os.path.basename(path))
+            except Exception as e:
+                QMessageBox.critical(self, self.tr("error_open"), self.tr("failed_open").format(e))
+        self._rebuild_thumbs()
 
+    def _remove_image(self, idx: int):
+        if 0 <= idx < len(self._images):
+            self._images.pop(idx); self._names.pop(idx)
+            self._rebuild_thumbs()
+
+    def _move_left(self, idx: int):
+        if idx > 0:
+            self._images[idx-1], self._images[idx] = self._images[idx], self._images[idx-1]
+            self._names[idx-1],  self._names[idx]  = self._names[idx],  self._names[idx-1]
+            self._rebuild_thumbs()
+
+    def _move_right(self, idx: int):
+        if idx < len(self._images) - 1:
+            self._images[idx+1], self._images[idx] = self._images[idx], self._images[idx+1]
+            self._names[idx+1],  self._names[idx]  = self._names[idx],  self._names[idx+1]
+            self._rebuild_thumbs()
+
+    def _clear_images(self):
+        self._images.clear(); self._names.clear()
+        self._rebuild_thumbs()
+
+    # ── Color pickers ─────────────────────────────────────────────────────────
+    def _pick_divider_color(self):
+        color = QColorDialog.getColor(QColor(self._divider_color), self, "Divider color")
+        if color.isValid():
+            self._divider_color = color.name()
+            self._refresh_divider_btn()
+            self.divider_color_lbl.setText(self._divider_color)
+
+    def _refresh_divider_btn(self):
+        self.divider_color_btn.setStyleSheet(
+            button_style(self._divider_color, fg=_contrast(self._divider_color),
+                         extra=f"padding:{self.s(4)}px {self.s(10)}px;"))
+
+    def _pick_grid_bg(self):
+        color = QColorDialog.getColor(QColor(self._grid_bg_color), self, "Grid background")
+        if color.isValid():
+            self._grid_bg_color = color.name()
+            self._refresh_grid_bg_btn()
+
+    def _refresh_grid_bg_btn(self):
+        self.grid_bg_btn.setStyleSheet(
+            button_style(self._grid_bg_color, fg=_contrast(self._grid_bg_color),
+                         extra=f"padding:{self.s(4)}px {self.s(10)}px;"))
+        self.grid_bg_btn.setText(self._grid_bg_color)
+
+    def _update_divider_state(self):
+        on = self.divider_enabled.isChecked() and self.divider_enabled.isEnabled()
+        self.divider_width.setEnabled(on)
+        self.divider_color_btn.setEnabled(on)
+
+    # ── Compression ───────────────────────────────────────────────────────────
+    def _update_compress_state(self):
+        self.quality_slider.setEnabled(self.compress_enabled.isChecked())
+
+    def _on_quality_changed(self, val: int):
+        self.quality_val_lbl.setText(f"{val}%")
+        tr = self.tr
+        if val >= 90:   hint = tr("quality_90")
+        elif val >= 75: hint = tr("quality_75")
+        elif val >= 50: hint = tr("quality_50")
+        else:           hint = tr("quality_low")
+        self.comp_hint_lbl.setText(hint.format(val))
+
+    # ── Menu dialogs ──────────────────────────────────────────────────────────
+    def _open_model_dialog(self):
+        dlg = ModelDialog(self, self._model, self._known_models, self.s, self.tr, self._api_key)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_model:
+            self._model = dlg.result_model
+            for m in dlg._known: self._known_models = list(dict.fromkeys(self._known_models + [m]))
+            self._refresh_model_lbl()
+
+    def _open_apikey_dialog(self):
+        dlg = ApiKeyDialog(self, self._api_key, self.s, self.tr)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._api_key = dlg.result_key or ""; self._do_save_config()
+
+    def _open_prompt_dialog(self):
+        dlg = PromptDialog(self, self._prompt, self.s, self.tr)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_text is not None:
+            self._prompt = dlg.result_text or DEFAULT_PROMPTS[self._lang]
+
+    def _refresh_model_lbl(self):
+        self.model_lbl.setText(self.tr("model_current").format(self._model))
+
+    # ── Preview helper ────────────────────────────────────────────────────────
+    def _show_preview(self, label: QLabel, img: Image.Image):
+        pix    = pil_to_pixmap(img)
+        scaled = pix.scaled(label.width() - 4, label.height() - 4,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+        label.setPixmap(scaled)
+        label.setStyleSheet("background:white; border:1px solid #999;")
+
+    # ── Merge ─────────────────────────────────────────────────────────────────
     def _merge(self):
-        if None in self.pil_images:
-            messagebox.showwarning("Нет изображений", "Загрузите оба изображения.")
+        if len(self._images) < 2:
+            QMessageBox.warning(self, self.tr("no_images"), self.tr("load_images"))
             return
 
-        a, b = self.pil_images
-        div_on    = self._divider_enabled.get()
-        div_w     = max(1, self._divider_width.get()) if div_on else 0
-        div_color = self._divider_color
+        mode = self._current_mode()
 
-        if self.direction.get() == "horizontal":
-            h   = max(a.height, b.height)
-            a_r = a.resize((int(a.width * h / a.height), h), Image.LANCZOS)
-            b_r = b.resize((int(b.width * h / b.height), h), Image.LANCZOS)
-            total_w = a_r.width + b_r.width + div_w
-            out = Image.new("RGBA", (total_w, h), (0, 0, 0, 0))
-            out.paste(a_r, (0, 0))
-            if div_on and div_w > 0:
-                draw = ImageDraw.Draw(out)
-                r, g, bl = int(div_color[1:3], 16), int(div_color[3:5], 16), int(div_color[5:7], 16)
-                draw.rectangle([a_r.width, 0, a_r.width + div_w - 1, h - 1],
-                                fill=(r, g, bl, 255))
-            out.paste(b_r, (a_r.width + div_w, 0))
+        # Divider tuple: (width, color_hex) or None
+        if self.divider_enabled.isChecked() and self.divider_enabled.isEnabled():
+            divider = (self.divider_width.value(), self._divider_color)
         else:
-            w   = max(a.width, b.width)
-            a_r = a.resize((w, int(a.height * w / a.width)), Image.LANCZOS)
-            b_r = b.resize((w, int(b.height * w / b.width)), Image.LANCZOS)
-            total_h = a_r.height + b_r.height + div_w
-            out = Image.new("RGBA", (w, total_h), (0, 0, 0, 0))
-            out.paste(a_r, (0, 0))
-            if div_on and div_w > 0:
-                draw = ImageDraw.Draw(out)
-                r, g, bl = int(div_color[1:3], 16), int(div_color[3:5], 16), int(div_color[5:7], 16)
-                draw.rectangle([0, a_r.height, w - 1, a_r.height + div_w - 1],
-                                fill=(r, g, bl, 255))
-            out.paste(b_r, (0, a_r.height + div_w))
+            divider = None
+
+        if mode == "horizontal":
+            out = merge_horizontal(self._images, divider)
+        elif mode == "vertical":
+            out = merge_vertical(self._images, divider)
+        else:  # grid
+            cols      = self.grid_cols.value()
+            padding   = self.grid_padding.value()
+            cell_fill = self.grid_align.currentIndex() == 0  # 0=Fill, 1=Fit
+            out = merge_grid(self._images, cols, padding, self._grid_bg_color, cell_fill)
 
         self.result_pil = out
-        self.result_tk  = self._show_preview(self.result_canvas, out)
+        self._show_preview(self.result_label, out)
         self._update_file_info()
 
+    # ── File info ─────────────────────────────────────────────────────────────
     def _update_file_info(self):
-        if self.result_pil is None:
-            self._file_info_lbl.configure(text="")
-            return
-        w, h = self.result_pil.size
-        # Estimate size
-        if self._compress_enabled.get():
-            buf = io.BytesIO()
-            self.result_pil.convert("RGB").save(buf, format="JPEG",
-                                                quality=self._compress_quality.get())
-            size_kb = len(buf.getvalue()) / 1024
+        img = self.result_pil
+        if img is None:
+            self.file_info_lbl.setText(""); return
+        w, h = img.size
+        buf  = io.BytesIO()
+        if self.compress_enabled.isChecked():
+            img.convert("RGB").save(buf, format="JPEG", quality=self.quality_slider.value())
             fmt = "JPEG"
         else:
-            buf = io.BytesIO()
-            self.result_pil.save(buf, format="PNG")
-            size_kb = len(buf.getvalue()) / 1024
-            fmt = "PNG"
-        if size_kb >= 1024:
-            size_str = f"{size_kb / 1024:.1f} МБ"
-        else:
-            size_str = f"{size_kb:.0f} КБ"
-        self._file_info_lbl.configure(
-            text=f"Размер: {w}×{h} пикс. | Формат: {fmt} | ~{size_str}"
-        )
+            img.save(buf, format="PNG"); fmt = "PNG"
+        kb = len(buf.getvalue()) / 1024
+        size_str = self.tr("mb").format(kb / 1024) if kb >= 1024 else self.tr("kb").format(kb)
+        self.file_info_lbl.setText(self.tr("size_info").format(w, h, fmt, size_str))
 
+    # ── Describe ──────────────────────────────────────────────────────────────
     def _describe(self):
         if self.result_pil is None:
-            messagebox.showwarning("Нет результата", "Сначала склейте изображения.")
-            return
-        api_key = self.api_key_var.get().strip()
-        if not api_key:
-            messagebox.showwarning("API ключ",
-                                   "Введите Gemini API ключ.\n"
-                                   "Получить бесплатно: aistudio.google.com/apikey")
-            return
+            QMessageBox.warning(self, self.tr("no_result"), self.tr("merge_first")); return
+        if not self._api_key:
+            QMessageBox.warning(self, self.tr("api_key_missing"), self.tr("enter_api_key")); return
+        extra = self.extra_prompt.text().strip()
+        full_prompt = self._prompt + ("\n\nAdditional context: " + extra if extra else "")
+        self.desc_text.setReadOnly(True)
+        self.desc_text.setPlainText(self.tr("describing"))
+        self._worker = DescribeWorker(self._api_key, self._model, full_prompt, self.result_pil, self._lang)
+        self._worker.finished_ok.connect(self._on_describe_ok)
+        self._worker.finished_err.connect(self._on_describe_err)
+        self._worker.start()
 
-        self._set_desc("⏳ Описываю изображение...")
-        self.update()
-        model  = self._model
-        prompt = self._prompt
+    def _on_describe_ok(self, text: str):
+        self._do_save_config()
+        self.desc_text.setReadOnly(False)
+        self.desc_text.setPlainText(text)
 
-        def worker():
-            try:
-                result = describe_image_gemini(api_key, model, prompt, self.result_pil)
-                self.after(0, self._do_save_config)
-                self.after(0, self._set_desc, result)
-            except Exception as e:
-                err_text = friendly_api_error(e, model)
-                self.after(0, self._set_desc, err_text)
-
-        threading.Thread(target=worker, daemon=True).start()
+    def _on_describe_err(self, text: str):
+        self.desc_text.setReadOnly(False)
+        self.desc_text.setPlainText(text)
 
     def _copy_desc(self):
-        text = self.desc_text.get("1.0", "end").strip()
-        if text:
-            self.clipboard_clear()
-            self.clipboard_append(text)
+        text = self.desc_text.toPlainText().strip()
+        if text: QApplication.clipboard().setText(text)
+
+    # ── Save ──────────────────────────────────────────────────────────────────
+    def _auto_filename(self) -> str:
+        from datetime import datetime
+        return "result_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     def _save(self):
         if self.result_pil is None:
-            messagebox.showwarning("Нет результата", "Сначала склейте изображения.")
-            return
-
-        use_jpeg = self._compress_enabled.get()
-        quality  = self._compress_quality.get()
-        name     = self.filename_var.get().strip() or "result"
-        default_ext = ".jpg" if use_jpeg else ".png"
-
-        path = filedialog.asksaveasfilename(
-            title="Сохранить изображение",
-            initialfile=name,
-            defaultextension=default_ext,
-            filetypes=[("JPEG", "*.jpg"), ("PNG", "*.png"), ("Все файлы", "*.*")]
-                       if use_jpeg else
-                       [("PNG", "*.png"), ("JPEG", "*.jpg"), ("Все файлы", "*.*")]
-        )
-        if not path:
-            return
+            QMessageBox.warning(self, self.tr("no_result"), self.tr("merge_first")); return
+        use_jpeg = self.compress_enabled.isChecked()
+        filt = ("JPEG (*.jpg);;PNG (*.png);;All files (*.*)" if use_jpeg
+                else "PNG (*.png);;JPEG (*.jpg);;All files (*.*)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save image", self._auto_filename() + (".jpg" if use_jpeg else ".png"), filt)
+        if not path: return
         try:
             img = self.result_pil
             if path.lower().endswith((".jpg", ".jpeg")) or use_jpeg:
-                img = img.convert("RGB")
-                img.save(path, format="JPEG", quality=quality, optimize=True)
+                if not path.lower().endswith((".jpg", ".jpeg")): path += ".jpg"
+                img.convert("RGB").save(path, format="JPEG",
+                                        quality=self.quality_slider.value(), optimize=True)
             else:
+                if not path.lower().endswith(".png"): path += ".png"
                 img.save(path, format="PNG", optimize=True)
         except Exception as e:
-            messagebox.showerror("Ошибка сохранения", str(e))
+            QMessageBox.critical(self, self.tr("save_error"), str(e))
+
+    # ── Config ────────────────────────────────────────────────────────────────
+    def _do_save_config(self):
+        self._config.update({
+            "gemini_api_key":   self._api_key,
+            "gemini_model":     self._model,
+            "gemini_prompt":    self._prompt,
+            "divider_enabled":  self.divider_enabled.isChecked(),
+            "divider_color":    self._divider_color,
+            "divider_width":    self.divider_width.value(),
+            "compress_enabled": self.compress_enabled.isChecked(),
+            "compress_quality": self.quality_slider.value(),
+            "language":         self._lang,
+            "known_models":     self._known_models,
+            "merge_mode":       self._current_mode(),
+            "grid_cols":        self.grid_cols.value(),
+            "grid_padding":     self.grid_padding.value(),
+            "grid_bg_color":    self._grid_bg_color,
+        })
+        save_config(self._config)
+
+    def closeEvent(self, event):
+        self._config["window_geometry"] = bytes(self.saveGeometry()).hex()
+        self._do_save_config()
+        super().closeEvent(event)
 
     def _restore_window(self):
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
         geo = self._config.get("window_geometry")
         if geo:
-            self.geometry(geo)
-        else:
-            self.geometry(f"{screen_w}x{screen_h}+0+0")
+            try: self.restoreGeometry(bytes.fromhex(geo)); return
+            except Exception: pass
+        self.setGeometry(QApplication.primaryScreen().availableGeometry())
 
-    def _save_window(self):
-        self._config["window_geometry"] = self.geometry()
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+def main():
+    app = QApplication(sys.argv)
+    win = ImageMerger()
+    win.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
-    ImageMerger().mainloop()
+    main()
