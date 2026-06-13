@@ -158,6 +158,8 @@ STRINGS = {
         "translator_not_available": "deep-translator is not installed.\nRun: pip install deep-translator",
         "translator_settings_title": "Translator settings",
         "translator_provider_label": "Translation provider:",
+        "swap_btn":            "⇄ Swap",
+        "swap_tooltip":        "Swap original ↔ translation and flip the target language",
         "err_400": "❌ Error 400 — Bad request.\n\n{}\nCheck your prompt and data format.",
         "err_401": "❌ Error 401 — API key invalid or missing.\n\nGet a key: aistudio.google.com/apikey",
         "err_403": "❌ Error 403 — Access forbidden.\n\nCurrent model: {}",
@@ -249,6 +251,8 @@ STRINGS = {
         "translator_not_available": "deep-translator не установлен.\nВыполните: pip install deep-translator",
         "translator_settings_title": "Настройки переводчика",
         "translator_provider_label": "Провайдер перевода:",
+        "swap_btn":            "⇄ Поменять",
+        "swap_tooltip":        "Поменять исходный ↔ перевод и сменить язык перевода",
         "err_400": "❌ Ошибка 400 — Неверный запрос.\n\n{}\nПроверьте промпт и формат данных.",
         "err_401": "❌ Ошибка 401 — API ключ недействителен.\n\nПолучить ключ: aistudio.google.com/apikey",
         "err_403": "❌ Ошибка 403 — Доступ запрещён.\n\nТекущая модель: {}",
@@ -841,6 +845,12 @@ class ImageMerger(QMainWindow):
         self._translate_worker: TranslateWorker | None = None
         # Stores only the original (pre-translation) description text
         self._original_description: str = ""
+        # Lang-pair tracking for ⇄ swap:
+        # _swap_lang_to   = display name of the language last translated INTO (shown in combo)
+        # _swap_lang_from = display name of the language last translated FROM
+        self._swap_lang_to:   str = ""
+        self._swap_lang_from: str = ""
+        self._current_source_for_translation: str = ""
 
         geo    = QApplication.primaryScreen().availableGeometry()
         factor = max(0.7, min(1.6, min(geo.width() / 1920, geo.height() / 1080)))
@@ -1034,12 +1044,17 @@ class ImageMerger(QMainWindow):
 
         self._result_title = QLabel()
         left.addWidget(self._result_title)
-        preview_w = self.s(560); preview_h = self.s(220)
+
+        # ── FIX: result_label expands horizontally to match buttons width ────
+        preview_h = self.s(220)
         self.result_label = QLabel()
-        self.result_label.setFixedSize(preview_w, preview_h)
+        self.result_label.setFixedHeight(preview_h)
+        self.result_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.result_label.setStyleSheet("background:white; border:1px solid #999; color:#aaa;")
         self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left.addWidget(self.result_label)
+
         self.file_info_lbl = QLabel(); self.file_info_lbl.setStyleSheet("color:#555; font-size:10px;")
         left.addWidget(self.file_info_lbl)
         self.save_btn = QPushButton()
@@ -1096,13 +1111,20 @@ class ImageMerger(QMainWindow):
         for ln in lang_names:
             self.translate_lang_combo.addItem(ln)
         # Restore saved selection
-        saved_tl = self._config.get("translate_target_lang", "Russian")
+        saved_tl = self._config.get("translate_target_lang", "Русский")
         if saved_tl in lang_names:
             self.translate_lang_combo.setCurrentText(saved_tl)
         self.translate_lang_combo.currentTextChanged.connect(self._on_translate_lang_changed)
         translate_row.addWidget(self.translate_lang_combo)
 
         translate_row.addStretch()
+
+        self.swap_btn = QPushButton()
+        self.swap_btn.setStyleSheet(
+            button_style("#6c757d", extra=f"padding:{s(6)}px {s(10)}px;"))
+        self.swap_btn.setEnabled(False)   # enabled only after a successful translation
+        self.swap_btn.clicked.connect(self._swap_texts)
+        translate_row.addWidget(self.swap_btn)
 
         self.translate_btn = QPushButton()
         self.translate_btn.setStyleSheet(
@@ -1191,6 +1213,8 @@ class ImageMerger(QMainWindow):
         self.extra_prompt.setPlaceholderText(tr("extra_prompt_hint"))
         self.describe_btn.setText(tr("describe_btn"))
         self._translate_to_lbl.setText(tr("translate_to"))
+        self.swap_btn.setText(tr("swap_btn"))
+        self.swap_btn.setToolTip(tr("swap_tooltip"))
         self.translate_btn.setText(tr("translate_btn"))
         self._refresh_model_lbl()
         self._on_quality_changed(self.quality_slider.value())
@@ -1390,6 +1414,10 @@ class ImageMerger(QMainWindow):
         self._original_description = text   # store clean original
         self.desc_text.setReadOnly(False)
         self.desc_text.setPlainText(text)
+        # Reset swap state: new description means no translation yet
+        self._swap_lang_from = ""
+        self._swap_lang_to   = self.translate_lang_combo.currentText()
+        self.swap_btn.setEnabled(False)
 
     def _on_describe_err(self, text: str):
         self._original_description = ""
@@ -1402,7 +1430,26 @@ class ImageMerger(QMainWindow):
 
     # ── Translation ───────────────────────────────────────────────────────────
     def _on_translate_lang_changed(self, _lang_name: str):
+        # User manually changed the target language — reset the swap pair
+        self._swap_lang_from = ""
+        self._swap_lang_to   = _lang_name
+        self.swap_btn.setEnabled(False)
         self._do_save_config()
+
+    def _get_source_text(self) -> str:
+        """
+        Return the text that should be translated.
+        If the text field contains a separator (previous translation present),
+        take whatever is ABOVE the separator (the user may have edited it).
+        Otherwise use the full field content.
+        Falls back to _original_description if the field is empty.
+        """
+        full = self.desc_text.toPlainText()
+        if _TRANSLATE_SEP in full:
+            above = full.split(_TRANSLATE_SEP)[0].strip()
+            return above if above else self._original_description.strip()
+        text = full.strip()
+        return text if text else self._original_description.strip()
 
     def _translate(self):
         if not DEEP_TRANSLATOR_AVAILABLE:
@@ -1410,21 +1457,40 @@ class ImageMerger(QMainWindow):
                                 self.tr("translator_not_available"))
             return
 
-        # Use only the original description (never the already-translated part)
-        source_text = self._original_description.strip()
+        source_text = self._get_source_text()
         if not source_text:
             QMessageBox.information(self, self.tr("menu_translator"),
                                     self.tr("no_text_to_translate"))
             return
 
-        lang_name = self.translate_lang_combo.currentText()
-        target_code = TRANSLATE_LANGUAGES.get(lang_name, "en")
+        self._current_source_for_translation = source_text
+
+        # ── Remember the lang pair so swap can invert it precisely ──────────
+        # _swap_lang_to   = display name of language we are translating INTO
+        # _swap_lang_from = display name of language we are translating FROM
+        #
+        # On the very first translation _swap_lang_from is "". We resolve it
+        # here by comparing the target with all known UI languages. We assume
+        # the source is the app's current UI language; if the UI language equals
+        # the target, we fall back to "English" as the source display name.
+        new_target = self.translate_lang_combo.currentText()
+
+        if not self._swap_lang_from:
+            # Infer source display-name from the current UI language code
+            ui_code = {"en": "en", "ru": "ru"}.get(self._lang, "en")
+            inferred = next(
+                (name for name, code in TRANSLATE_LANGUAGES.items() if code == ui_code),
+                "English"
+            )
+            self._swap_lang_from = inferred if inferred != new_target else "English"
+
+        self._swap_lang_to = new_target
+        target_code = TRANSLATE_LANGUAGES.get(new_target, "en")
 
         self.translate_btn.setEnabled(False)
+        self.swap_btn.setEnabled(False)
         self.desc_text.setReadOnly(True)
-        # Show original + loading hint
-        self.desc_text.setPlainText(
-            self._original_description + _TRANSLATE_SEP + self.tr("translating"))
+        self.desc_text.setPlainText(source_text + _TRANSLATE_SEP + self.tr("translating"))
 
         self._translate_worker = TranslateWorker(source_text, target_code,
                                                   self._translator_provider)
@@ -1435,16 +1501,58 @@ class ImageMerger(QMainWindow):
     def _on_translate_ok(self, translated: str):
         self.translate_btn.setEnabled(True)
         self.desc_text.setReadOnly(False)
-        # Combine original + separator + translation
-        combined = self._original_description + _TRANSLATE_SEP + translated
+        source = self._current_source_for_translation
+        combined = source + _TRANSLATE_SEP + translated
         self.desc_text.setPlainText(combined)
+        self.swap_btn.setEnabled(True)
 
     def _on_translate_err(self, err: str):
         self.translate_btn.setEnabled(True)
         self.desc_text.setReadOnly(False)
-        # Restore original text and show error
-        combined = self._original_description + _TRANSLATE_SEP + self.tr("translate_error").format(err)
+        source = getattr(self, "_current_source_for_translation", self._original_description)
+        combined = source + _TRANSLATE_SEP + self.tr("translate_error").format(err)
         self.desc_text.setPlainText(combined)
+        self.swap_btn.setEnabled(False)
+
+    def _swap_texts(self):
+        """
+        Swap the upper (source) and lower (translation) blocks.
+        Also swap the remembered lang pair and update the combo to the new target.
+        Works correctly on repeated presses (toggles back and forth).
+        """
+        full = self.desc_text.toPlainText()
+        if _TRANSLATE_SEP not in full:
+            return
+
+        parts = full.split(_TRANSLATE_SEP, 1)
+        old_source = parts[0].strip()
+        old_translation = parts[1].strip()
+        if not old_translation:
+            return
+
+        # ── Swap text blocks ──────────────────────────────────────────────────
+        self.desc_text.setPlainText(old_translation + _TRANSLATE_SEP + old_source)
+
+        # Update internal source tracker
+        self._original_description = old_translation
+        self._current_source_for_translation = old_translation
+
+        # ── Swap language pair ────────────────────────────────────────────────
+        # old_lang_to   = language that was the target  (shown in combo right now)
+        # old_lang_from = language that was the source
+        old_lang_to   = self._swap_lang_to    # e.g. "Русский"
+        old_lang_from = self._swap_lang_from  # e.g. "English"
+
+        # After swap: old target → new source, old source → new target
+        self._swap_lang_from = old_lang_to
+        self._swap_lang_to   = old_lang_from
+
+        # Apply the new target language to the combo box (always — both sides are known)
+        if old_lang_from and old_lang_from in TRANSLATE_LANGUAGES:
+            self.translate_lang_combo.blockSignals(True)
+            self.translate_lang_combo.setCurrentText(old_lang_from)
+            self.translate_lang_combo.blockSignals(False)
+            self._do_save_config()
 
     # ── Save ──────────────────────────────────────────────────────────────────
     def _auto_filename(self) -> str:
