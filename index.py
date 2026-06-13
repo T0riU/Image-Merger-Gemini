@@ -17,6 +17,12 @@ from PySide6.QtWidgets import (
 
 from PIL import Image, ImageDraw
 
+try:
+    from deep_translator import GoogleTranslator
+    DEEP_TRANSLATOR_AVAILABLE = True
+except ImportError:
+    DEEP_TRANSLATOR_AVAILABLE = False
+
 
 # ── Constants ────────────────────────────────────────────────────────────────
 CONFIG_PATH  = os.path.join(os.path.expanduser("~"), ".image_merger_config.json")
@@ -32,12 +38,43 @@ GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}
 GEMINI_LIST_URL = "https://generativelanguage.googleapis.com/v1beta/models?key={key}&pageSize=200"
 VISION_METHODS  = {"generateContent", "streamGenerateContent"}
 
-FALLBACK_MODELS = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
-]
+# No hardcoded fallback models — list is populated only after API fetch
+FALLBACK_MODELS: list[str] = []
+
+# Languages available for translation (display name → deep-translator code)
+TRANSLATE_LANGUAGES = {
+    "English":             "en",
+    "Русский":             "ru",
+    "Deutsch":             "de",
+    "Français":            "fr",
+    "Español":             "es",
+    "Italiano":            "it",
+    "Português":           "pt",
+    "Polski":              "pl",
+    "Nederlands":          "nl",
+    "Українська":          "uk",
+    "Türkçe":              "tr",
+    "العربية":             "ar",
+    "中文 (简体)":          "zh-CN",
+    "中文 (繁體)":          "zh-TW",
+    "日本語":              "ja",
+    "한국어":              "ko",
+    "हिन्दी":              "hi",
+    "Беларуская":          "be",
+    "Čeština":             "cs",
+    "Svenska":             "sv",
+    "Norsk":               "no",
+    "Suomi":               "fi",
+    "Dansk":               "da",
+    "Magyar":              "hu",
+    "Română":              "ro",
+    "Ελληνικά":            "el",
+    "Bahasa Indonesia":    "id",
+    "Tiếng Việt":          "vi",
+    "ภาษาไทย":             "th",
+}
+# Separator marker stored inside the description text to split original from translation
+_TRANSLATE_SEP = "\n\n─────────────────────\n"
 
 
 # ── i18n ─────────────────────────────────────────────────────────────────────
@@ -98,6 +135,8 @@ STRINGS = {
         "menu_model":          "Model…",
         "menu_api_key":        "API key…",
         "menu_prompt":         "Main prompt…",
+        "menu_translator":     "Translator",
+        "menu_translator_provider": "Provider…",
         "model_title":         "Select Gemini model",
         "model_free_label":    "Select a model (vision-capable, free tier):",
         "model_custom_label":  "Or enter manually:",
@@ -111,6 +150,14 @@ STRINGS = {
         "apikey_title":        "Gemini API key",
         "apikey_label":        "Enter your API key (stored locally):",
         "apikey_link":         "Get a free key at aistudio.google.com/apikey",
+        "translate_to":        "Translate to:",
+        "translate_btn":       "🌐  Translate",
+        "translating":         "⏳ Translating…",
+        "no_text_to_translate":"No text to translate. Describe the image first.",
+        "translate_error":     "Translation error: {}",
+        "translator_not_available": "deep-translator is not installed.\nRun: pip install deep-translator",
+        "translator_settings_title": "Translator settings",
+        "translator_provider_label": "Translation provider:",
         "err_400": "❌ Error 400 — Bad request.\n\n{}\nCheck your prompt and data format.",
         "err_401": "❌ Error 401 — API key invalid or missing.\n\nGet a key: aistudio.google.com/apikey",
         "err_403": "❌ Error 403 — Access forbidden.\n\nCurrent model: {}",
@@ -179,6 +226,8 @@ STRINGS = {
         "menu_model":          "Модель…",
         "menu_api_key":        "API ключ…",
         "menu_prompt":         "Главный промпт…",
+        "menu_translator":     "Переводчик",
+        "menu_translator_provider": "Провайдер…",
         "model_title":         "Выбор модели Gemini",
         "model_free_label":    "Выберите модель (с поддержкой изображений, бесплатные):",
         "model_custom_label":  "Или введите вручную:",
@@ -192,6 +241,14 @@ STRINGS = {
         "apikey_title":        "Gemini API ключ",
         "apikey_label":        "Введите ваш API ключ (хранится локально):",
         "apikey_link":         "Получить бесплатно на aistudio.google.com/apikey",
+        "translate_to":        "Перевести на:",
+        "translate_btn":       "🌐  Перевести",
+        "translating":         "⏳ Перевожу…",
+        "no_text_to_translate":"Нет текста для перевода. Сначала опишите изображение.",
+        "translate_error":     "Ошибка перевода: {}",
+        "translator_not_available": "deep-translator не установлен.\nВыполните: pip install deep-translator",
+        "translator_settings_title": "Настройки переводчика",
+        "translator_provider_label": "Провайдер перевода:",
         "err_400": "❌ Ошибка 400 — Неверный запрос.\n\n{}\nПроверьте промпт и формат данных.",
         "err_401": "❌ Ошибка 401 — API ключ недействителен.\n\nПолучить ключ: aistudio.google.com/apikey",
         "err_403": "❌ Ошибка 403 — Доступ запрещён.\n\nТекущая модель: {}",
@@ -209,6 +266,15 @@ STRINGS = {
 DEFAULT_PROMPTS = {
     "en": "Describe in detail what is shown in this image in English.",
     "ru": "Опиши подробно что изображено на этой картинке на русском языке.",
+}
+
+# Available translation providers (display name → deep_translator class name)
+TRANSLATOR_PROVIDERS = {
+    "Google Translate":   "GoogleTranslator",
+    "MyMemory":           "MyMemoryTranslator",
+    "DeepL (free)":       "DeeplTranslator",
+    "Linguee":            "LingueeTranslator",
+    "Pons":               "PonsTranslator",
 }
 
 
@@ -287,6 +353,31 @@ def fetch_vision_models(api_key: str) -> list[str]:
     return sorted(result)
 
 
+def do_translate(text: str, target_lang_code: str, provider_name: str) -> str:
+    """Translate text using deep-translator. Returns translated string."""
+    if not DEEP_TRANSLATOR_AVAILABLE:
+        raise RuntimeError("deep-translator not installed")
+
+    import deep_translator as dt
+
+    # Map provider display name → class
+    cls_map = {
+        "GoogleTranslator":   dt.GoogleTranslator,
+        "MyMemoryTranslator": dt.MyMemoryTranslator,
+        "LingueeTranslator":  dt.LingueeTranslator,
+        "PonsTranslator":     dt.PonsTranslator,
+    }
+    # DeepL optional
+    try:
+        cls_map["DeeplTranslator"] = dt.DeeplTranslator
+    except AttributeError:
+        pass
+
+    cls = cls_map.get(provider_name, dt.GoogleTranslator)
+    translator = cls(source="auto", target=target_lang_code)
+    return translator.translate(text)
+
+
 # ── Qt helpers ────────────────────────────────────────────────────────────────
 def pil_to_pixmap(img: Image.Image) -> QPixmap:
     img  = img.convert("RGBA")
@@ -330,7 +421,6 @@ def _contrast(hex_color: str) -> str:
 
 # ── Image merge logic ─────────────────────────────────────────────────────────
 def merge_horizontal(images: list[Image.Image], divider: tuple | None) -> Image.Image:
-    """Merge images side by side, all scaled to same height."""
     h   = max(img.height for img in images)
     scaled = [img.resize((max(1, int(img.width * h / img.height)), h), Image.LANCZOS)
               for img in images]
@@ -350,7 +440,6 @@ def merge_horizontal(images: list[Image.Image], divider: tuple | None) -> Image.
 
 
 def merge_vertical(images: list[Image.Image], divider: tuple | None) -> Image.Image:
-    """Merge images top-to-bottom, all scaled to same width."""
     w   = max(img.width for img in images)
     scaled = [img.resize((w, max(1, int(img.height * w / img.width))), Image.LANCZOS)
               for img in images]
@@ -371,12 +460,6 @@ def merge_vertical(images: list[Image.Image], divider: tuple | None) -> Image.Im
 
 def merge_grid(images: list[Image.Image], cols: int, padding: int,
                bg_color: str, cell_fill: bool) -> Image.Image:
-    """
-    Arrange images in a grid.
-    cell_fill=True  → each image is stretched to fill the cell (crop-to-fill).
-    cell_fill=False → each image fits inside the cell with bg padding.
-    Cell size = max image dimensions across the entire set.
-    """
     n    = len(images)
     rows = math.ceil(n / cols)
     cell_w = max(img.width  for img in images)
@@ -395,7 +478,6 @@ def merge_grid(images: list[Image.Image], cols: int, padding: int,
         cy  = padding + row * (cell_h + padding)
 
         if cell_fill:
-            # Crop-to-fill: scale so image covers the cell entirely
             scale = max(cell_w / img.width, cell_h / img.height)
             nw    = max(1, int(img.width  * scale))
             nh    = max(1, int(img.height * scale))
@@ -405,7 +487,6 @@ def merge_grid(images: list[Image.Image], cols: int, padding: int,
             thumb = thumb.crop((ox, oy, ox + cell_w, oy + cell_h))
             out.paste(thumb, (cx, cy))
         else:
-            # Fit: scale so image fits inside the cell, center it
             scale = min(cell_w / img.width, cell_h / img.height)
             nw    = max(1, int(img.width  * scale))
             nh    = max(1, int(img.height * scale))
@@ -452,14 +533,31 @@ class FetchModelsWorker(QThread):
         except Exception as e: self.finished_err.emit(str(e))
 
 
+class TranslateWorker(QThread):
+    finished_ok  = Signal(str)
+    finished_err = Signal(str)
+
+    def __init__(self, text: str, target_lang: str, provider: str):
+        super().__init__()
+        self.text        = text
+        self.target_lang = target_lang
+        self.provider    = provider
+
+    def run(self):
+        try:
+            result = do_translate(self.text, self.target_lang, self.provider)
+            self.finished_ok.emit(result)
+        except Exception as e:
+            self.finished_err.emit(str(e))
+
+
 # ── Thumbnail card widget ─────────────────────────────────────────────────────
 class ThumbCard(QWidget):
-    """Small removable thumbnail shown in the image list panel."""
-    remove_requested = Signal(int)   # emits own index
+    remove_requested = Signal(int)
     move_left        = Signal(int)
     move_right       = Signal(int)
 
-    THUMB = 90  # thumbnail pixel size (before scale)
+    THUMB = 90
 
     def __init__(self, idx: int, img: Image.Image, filename: str, scale: Scale):
         super().__init__()
@@ -472,7 +570,6 @@ class ThumbCard(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(scale(2))
 
-        # Thumbnail
         pix     = pil_to_pixmap(img)
         thumb   = pix.scaled(sz, sz, Qt.AspectRatioMode.KeepAspectRatio,
                               Qt.TransformationMode.SmoothTransformation)
@@ -483,14 +580,12 @@ class ThumbCard(QWidget):
         img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(img_lbl)
 
-        # Filename (truncated)
         name = filename if len(filename) <= 12 else filename[:10] + "…"
         name_lbl = QLabel(name)
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         name_lbl.setStyleSheet("font-size:8px; color:#555;")
         root.addWidget(name_lbl)
 
-        # Controls row: ◀ index ▶  ✕
         ctrl = QHBoxLayout()
         ctrl.setContentsMargins(0, 0, 0, 0)
         ctrl.setSpacing(scale(2))
@@ -678,13 +773,58 @@ class ModelDialog(QDialog):
         self.accept()
 
 
+class TranslatorSettingsDialog(QDialog):
+    """Dialog for choosing the translation provider."""
+
+    def __init__(self, parent, current_provider: str, scale: Scale, tr):
+        super().__init__(parent)
+        self.setWindowTitle(tr("translator_settings_title"))
+        self.result_provider = None
+        s = scale
+
+        root = QVBoxLayout(self)
+        root.setSpacing(s(8))
+        root.addWidget(QLabel(tr("translator_provider_label")))
+
+        self.combo = QComboBox()
+        self.combo.setMinimumWidth(s(260))
+        for display_name in TRANSLATOR_PROVIDERS:
+            self.combo.addItem(display_name)
+        # Pre-select current
+        for i, cls_name in enumerate(TRANSLATOR_PROVIDERS.values()):
+            if cls_name == current_provider:
+                self.combo.setCurrentIndex(i)
+                break
+        root.addWidget(self.combo)
+
+        if not DEEP_TRANSLATOR_AVAILABLE:
+            warn = QLabel("⚠ deep-translator not installed.\npip install deep-translator")
+            warn.setStyleSheet("color:#c00; font-size:10px;")
+            root.addWidget(warn)
+
+        br = QHBoxLayout(); br.addStretch()
+        cancel = QPushButton(tr("cancel"))
+        cancel.setStyleSheet(button_style("#6c757d", extra=f"padding:{s(6)}px {s(16)}px;"))
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton(tr("apply"))
+        ok.setStyleSheet(button_style("#4a90d9", extra=f"padding:{s(6)}px {s(20)}px; font-weight:bold;"))
+        ok.clicked.connect(self._ok)
+        br.addWidget(cancel); br.addWidget(ok)
+        root.addLayout(br)
+
+    def _ok(self):
+        display = self.combo.currentText()
+        self.result_provider = TRANSLATOR_PROVIDERS.get(display, "GoogleTranslator")
+        self.accept()
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 class ImageMerger(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self._images:   list[Image.Image] = []   # PIL images in order
-        self._names:    list[str]         = []   # filenames
+        self._images:   list[Image.Image] = []
+        self._names:    list[str]         = []
         self.result_pil: Image.Image | None = None
 
         self._config        = load_config()
@@ -694,8 +834,13 @@ class ImageMerger(QMainWindow):
         self._prompt        = self._config.get("gemini_prompt", DEFAULT_PROMPTS[self._lang])
         self._divider_color = self._config.get("divider_color", "#000000")
         self._grid_bg_color = self._config.get("grid_bg_color", "#ffffff")
-        self._known_models  = self._config.get("known_models", list(FALLBACK_MODELS))
+        # No hardcoded models — only loaded from API
+        self._known_models  = self._config.get("known_models", [])
+        self._translator_provider = self._config.get("translator_provider", "GoogleTranslator")
         self._worker: DescribeWorker | None = None
+        self._translate_worker: TranslateWorker | None = None
+        # Stores only the original (pre-translation) description text
+        self._original_description: str = ""
 
         geo    = QApplication.primaryScreen().availableGeometry()
         factor = max(0.7, min(1.6, min(geo.width() / 1920, geo.height() / 1080)))
@@ -718,11 +863,14 @@ class ImageMerger(QMainWindow):
 
         # Menu bar
         mb = self.menuBar()
+
+        # 1. Language menu
         self._menu_lang = mb.addMenu("")
         for lang, label in [("en", "English"), ("ru", "Русский")]:
             a = QAction(label, self); a.triggered.connect(lambda _, l=lang: self._set_language(l))
             self._menu_lang.addAction(a)
 
+        # 2. Settings menu (Gemini)
         self._menu_settings = mb.addMenu("")
         self._act_model  = QAction("", self); self._act_model.triggered.connect(self._open_model_dialog)
         self._act_apikey = QAction("", self); self._act_apikey.triggered.connect(self._open_apikey_dialog)
@@ -731,6 +879,12 @@ class ImageMerger(QMainWindow):
         self._menu_settings.addAction(self._act_apikey)
         self._menu_settings.addSeparator()
         self._menu_settings.addAction(self._act_prompt)
+
+        # 3. Translator menu
+        self._menu_translator = mb.addMenu("")
+        self._act_translator_provider = QAction("", self)
+        self._act_translator_provider.triggered.connect(self._open_translator_settings)
+        self._menu_translator.addAction(self._act_translator_provider)
 
         # Root layout
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
@@ -749,7 +903,6 @@ class ImageMerger(QMainWindow):
         images_layout = QVBoxLayout(self._images_box)
         images_layout.setSpacing(s(6))
 
-        # Scroll area for thumbnails
         thumb_scroll = QScrollArea()
         thumb_scroll.setWidgetResizable(True)
         thumb_scroll.setFixedHeight(s(170))
@@ -764,7 +917,6 @@ class ImageMerger(QMainWindow):
         thumb_scroll.setWidget(self._thumb_widget)
         images_layout.addWidget(thumb_scroll)
 
-        # Add / clear buttons
         btn_row = QHBoxLayout()
         self.add_btn = QPushButton()
         self.add_btn.setStyleSheet(button_style("#4a90d9", extra=f"padding:{s(6)}px {s(14)}px;"))
@@ -782,7 +934,6 @@ class ImageMerger(QMainWindow):
         self.settings_box = QGroupBox()
         sg = QVBoxLayout(self.settings_box); sg.setSpacing(s(4))
 
-        # Mode selector
         mode_row = QHBoxLayout()
         self._mode_lbl = QLabel()
         mode_row.addWidget(self._mode_lbl)
@@ -798,7 +949,6 @@ class ImageMerger(QMainWindow):
 
         sg.addWidget(self._hline())
 
-        # Grid settings (shown only in grid mode)
         self._grid_box = QGroupBox()
         gb = QHBoxLayout(self._grid_box); gb.setSpacing(s(8))
         self._grid_cols_lbl = QLabel()
@@ -832,7 +982,6 @@ class ImageMerger(QMainWindow):
 
         sg.addWidget(self._hline())
 
-        # Divider settings
         div_row = QHBoxLayout()
         self.divider_enabled = QCheckBox()
         self.divider_enabled.setChecked(self._config.get("divider_enabled", False))
@@ -857,7 +1006,6 @@ class ImageMerger(QMainWindow):
 
         sg.addWidget(self._hline())
 
-        # Compression
         comp_row = QHBoxLayout()
         self.compress_enabled = QCheckBox()
         self.compress_enabled.setChecked(self._config.get("compress_enabled", False))
@@ -879,13 +1027,11 @@ class ImageMerger(QMainWindow):
 
         left.addWidget(self.settings_box)
 
-        # Merge button
         self.merge_btn = QPushButton()
         self.merge_btn.setStyleSheet(button_style("#4a90d9", extra=f"font-weight:bold; padding:{s(10)}px;"))
         self.merge_btn.clicked.connect(self._merge)
         left.addWidget(self.merge_btn)
 
-        # Result preview
         self._result_title = QLabel()
         left.addWidget(self._result_title)
         preview_w = self.s(560); preview_h = self.s(220)
@@ -903,7 +1049,6 @@ class ImageMerger(QMainWindow):
         left.addStretch()
         root.addWidget(left_widget)
 
-        # Separator
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine); sep.setStyleSheet("color:#ccc;")
         root.addWidget(sep)
 
@@ -937,6 +1082,35 @@ class ImageMerger(QMainWindow):
 
         self.desc_text = QTextEdit(); self.desc_text.setReadOnly(True)
         right.addWidget(self.desc_text)
+
+        # ── Translation row ───────────────────────────────────────────────────
+        right.addWidget(self._hline())
+
+        translate_row = QHBoxLayout()
+        self._translate_to_lbl = QLabel()
+        translate_row.addWidget(self._translate_to_lbl)
+
+        self.translate_lang_combo = QComboBox()
+        self.translate_lang_combo.setMinimumWidth(s(160))
+        lang_names = list(TRANSLATE_LANGUAGES.keys())
+        for ln in lang_names:
+            self.translate_lang_combo.addItem(ln)
+        # Restore saved selection
+        saved_tl = self._config.get("translate_target_lang", "Russian")
+        if saved_tl in lang_names:
+            self.translate_lang_combo.setCurrentText(saved_tl)
+        self.translate_lang_combo.currentTextChanged.connect(self._on_translate_lang_changed)
+        translate_row.addWidget(self.translate_lang_combo)
+
+        translate_row.addStretch()
+
+        self.translate_btn = QPushButton()
+        self.translate_btn.setStyleSheet(
+            button_style("#5b6abf", extra=f"font-weight:bold; padding:{s(6)}px {s(14)}px;"))
+        self.translate_btn.clicked.connect(self._translate)
+        translate_row.addWidget(self.translate_btn)
+
+        right.addLayout(translate_row)
         root.addWidget(right_widget, stretch=1)
 
         # Restore mode
@@ -957,7 +1131,6 @@ class ImageMerger(QMainWindow):
     def _on_mode_changed(self, *_):
         is_grid = self._rb_grid.isChecked()
         self._grid_box.setVisible(is_grid)
-        # Divider not applicable to grid (padding replaces it)
         self.divider_enabled.setEnabled(not is_grid)
         self._update_divider_state()
 
@@ -976,6 +1149,9 @@ class ImageMerger(QMainWindow):
         self._act_apikey.setText(tr("menu_api_key"))
         self._act_prompt.setText(tr("menu_prompt"))
 
+        self._menu_translator.setTitle(tr("menu_translator"))
+        self._act_translator_provider.setText(tr("menu_translator_provider"))
+
         self._images_box.setTitle(tr("images_panel"))
         self.add_btn.setText(tr("add_images"))
         self.clear_btn.setText(tr("clear_all"))
@@ -990,12 +1166,11 @@ class ImageMerger(QMainWindow):
         self._grid_pad_lbl.setText(tr("grid_padding"))
         self._grid_align_lbl.setText(tr("cell_align"))
         self._grid_bg_lbl.setText(tr("grid_bg"))
-        # Repopulate combo preserving selection
         cur_idx = self.grid_align.currentIndex()
         self.grid_align.blockSignals(True)
         self.grid_align.clear()
-        self.grid_align.addItem(tr("align_fill"))  # index 0
-        self.grid_align.addItem(tr("align_fit"))   # index 1
+        self.grid_align.addItem(tr("align_fill"))
+        self.grid_align.addItem(tr("align_fit"))
         self.grid_align.setCurrentIndex(max(0, cur_idx))
         self.grid_align.blockSignals(False)
 
@@ -1015,12 +1190,13 @@ class ImageMerger(QMainWindow):
         self._extra_lbl.setText(tr("extra_prompt_label"))
         self.extra_prompt.setPlaceholderText(tr("extra_prompt_hint"))
         self.describe_btn.setText(tr("describe_btn"))
+        self._translate_to_lbl.setText(tr("translate_to"))
+        self.translate_btn.setText(tr("translate_btn"))
         self._refresh_model_lbl()
         self._on_quality_changed(self.quality_slider.value())
 
     # ── Thumbnail list management ─────────────────────────────────────────────
     def _rebuild_thumbs(self):
-        # Remove all cards (not the stretch)
         while self._thumb_layout.count() > 1:
             item = self._thumb_layout.takeAt(0)
             if item.widget():
@@ -1132,6 +1308,12 @@ class ImageMerger(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_text is not None:
             self._prompt = dlg.result_text or DEFAULT_PROMPTS[self._lang]
 
+    def _open_translator_settings(self):
+        dlg = TranslatorSettingsDialog(self, self._translator_provider, self.s, self.tr)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_provider:
+            self._translator_provider = dlg.result_provider
+            self._do_save_config()
+
     def _refresh_model_lbl(self):
         self.model_lbl.setText(self.tr("model_current").format(self._model))
 
@@ -1152,7 +1334,6 @@ class ImageMerger(QMainWindow):
 
         mode = self._current_mode()
 
-        # Divider tuple: (width, color_hex) or None
         if self.divider_enabled.isChecked() and self.divider_enabled.isEnabled():
             divider = (self.divider_width.value(), self._divider_color)
         else:
@@ -1162,10 +1343,10 @@ class ImageMerger(QMainWindow):
             out = merge_horizontal(self._images, divider)
         elif mode == "vertical":
             out = merge_vertical(self._images, divider)
-        else:  # grid
+        else:
             cols      = self.grid_cols.value()
             padding   = self.grid_padding.value()
-            cell_fill = self.grid_align.currentIndex() == 0  # 0=Fill, 1=Fit
+            cell_fill = self.grid_align.currentIndex() == 0
             out = merge_grid(self._images, cols, padding, self._grid_bg_color, cell_fill)
 
         self.result_pil = out
@@ -1198,6 +1379,7 @@ class ImageMerger(QMainWindow):
         full_prompt = self._prompt + ("\n\nAdditional context: " + extra if extra else "")
         self.desc_text.setReadOnly(True)
         self.desc_text.setPlainText(self.tr("describing"))
+        self._original_description = ""   # reset while fetching
         self._worker = DescribeWorker(self._api_key, self._model, full_prompt, self.result_pil, self._lang)
         self._worker.finished_ok.connect(self._on_describe_ok)
         self._worker.finished_err.connect(self._on_describe_err)
@@ -1205,16 +1387,64 @@ class ImageMerger(QMainWindow):
 
     def _on_describe_ok(self, text: str):
         self._do_save_config()
+        self._original_description = text   # store clean original
         self.desc_text.setReadOnly(False)
         self.desc_text.setPlainText(text)
 
     def _on_describe_err(self, text: str):
+        self._original_description = ""
         self.desc_text.setReadOnly(False)
         self.desc_text.setPlainText(text)
 
     def _copy_desc(self):
         text = self.desc_text.toPlainText().strip()
         if text: QApplication.clipboard().setText(text)
+
+    # ── Translation ───────────────────────────────────────────────────────────
+    def _on_translate_lang_changed(self, _lang_name: str):
+        self._do_save_config()
+
+    def _translate(self):
+        if not DEEP_TRANSLATOR_AVAILABLE:
+            QMessageBox.warning(self, self.tr("menu_translator"),
+                                self.tr("translator_not_available"))
+            return
+
+        # Use only the original description (never the already-translated part)
+        source_text = self._original_description.strip()
+        if not source_text:
+            QMessageBox.information(self, self.tr("menu_translator"),
+                                    self.tr("no_text_to_translate"))
+            return
+
+        lang_name = self.translate_lang_combo.currentText()
+        target_code = TRANSLATE_LANGUAGES.get(lang_name, "en")
+
+        self.translate_btn.setEnabled(False)
+        self.desc_text.setReadOnly(True)
+        # Show original + loading hint
+        self.desc_text.setPlainText(
+            self._original_description + _TRANSLATE_SEP + self.tr("translating"))
+
+        self._translate_worker = TranslateWorker(source_text, target_code,
+                                                  self._translator_provider)
+        self._translate_worker.finished_ok.connect(self._on_translate_ok)
+        self._translate_worker.finished_err.connect(self._on_translate_err)
+        self._translate_worker.start()
+
+    def _on_translate_ok(self, translated: str):
+        self.translate_btn.setEnabled(True)
+        self.desc_text.setReadOnly(False)
+        # Combine original + separator + translation
+        combined = self._original_description + _TRANSLATE_SEP + translated
+        self.desc_text.setPlainText(combined)
+
+    def _on_translate_err(self, err: str):
+        self.translate_btn.setEnabled(True)
+        self.desc_text.setReadOnly(False)
+        # Restore original text and show error
+        combined = self._original_description + _TRANSLATE_SEP + self.tr("translate_error").format(err)
+        self.desc_text.setPlainText(combined)
 
     # ── Save ──────────────────────────────────────────────────────────────────
     def _auto_filename(self) -> str:
@@ -1245,20 +1475,22 @@ class ImageMerger(QMainWindow):
     # ── Config ────────────────────────────────────────────────────────────────
     def _do_save_config(self):
         self._config.update({
-            "gemini_api_key":   self._api_key,
-            "gemini_model":     self._model,
-            "gemini_prompt":    self._prompt,
-            "divider_enabled":  self.divider_enabled.isChecked(),
-            "divider_color":    self._divider_color,
-            "divider_width":    self.divider_width.value(),
-            "compress_enabled": self.compress_enabled.isChecked(),
-            "compress_quality": self.quality_slider.value(),
-            "language":         self._lang,
-            "known_models":     self._known_models,
-            "merge_mode":       self._current_mode(),
-            "grid_cols":        self.grid_cols.value(),
-            "grid_padding":     self.grid_padding.value(),
-            "grid_bg_color":    self._grid_bg_color,
+            "gemini_api_key":         self._api_key,
+            "gemini_model":           self._model,
+            "gemini_prompt":          self._prompt,
+            "divider_enabled":        self.divider_enabled.isChecked(),
+            "divider_color":          self._divider_color,
+            "divider_width":          self.divider_width.value(),
+            "compress_enabled":       self.compress_enabled.isChecked(),
+            "compress_quality":       self.quality_slider.value(),
+            "language":               self._lang,
+            "known_models":           self._known_models,
+            "merge_mode":             self._current_mode(),
+            "grid_cols":              self.grid_cols.value(),
+            "grid_padding":           self.grid_padding.value(),
+            "grid_bg_color":          self._grid_bg_color,
+            "translator_provider":    self._translator_provider,
+            "translate_target_lang":  self.translate_lang_combo.currentText(),
         })
         save_config(self._config)
 
